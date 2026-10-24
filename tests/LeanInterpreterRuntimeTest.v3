@@ -1,0 +1,45 @@
+def requireRuntime(ok: bool, message: string) {
+    if (!ok) System.error("Lean interpreter runtime test", message);
+}
+
+def main(args: Array<string>) {
+    def bytes = System.fileLoad(args[0]);
+    def extensions = Extension.set.all;
+    def parser = BinParser.new(extensions, Limits.new().set(extensions), ErrorGen.new(args[0]), args[0]);
+    def module = parser.push(bytes, 0, bytes.length).finish();
+    def instance = Instantiator.new(extensions, module, [], ErrorGen.new(args[0])).run();
+    def machine = V3Interpreter.new();
+    def interpreter = CBDLeanInterpreter.new(machine);
+    interpreter.init(instance, []);
+    def expected = Ints.parseDecimal(args[1], 0).1;
+    def mode = args[2];
+    def expected_size = Ints.parseDecimal(args[3], 0).1;
+    def table = machine.frame.func.decl.cbd_sidetable;
+    requireRuntime(table.length == expected_size, "validator sidetable byte length");
+    def old_stp = machine.frame.stp, old_pc = machine.codeptr.pos;
+    if (Strings.equal(mode, "label")) {
+        def entry = interpreter.lean_st_acquire_label();
+        requireRuntime(entry.length == STEntry_Label.size && machine.frame.stp == old_stp + STEntry_Label.size, "label acquisition cursor");
+        def label = interpreter.lean_st_load_label(entry);
+        requireRuntime(label.pc_delta == Ref<Sidetable_BrEntry>.at(table, old_stp).pc_delta, "label field load");
+    } else if (Strings.equal(mode, "labels")) {
+        def entry = interpreter.lean_st_acquire_labels();
+        requireRuntime(entry.length == STEntry_Labels.size && machine.frame.stp == old_stp + STEntry_Labels.size, "labels acquisition cursor");
+        requireRuntime(interpreter.lean_st_load_labels(entry) == 3u, "BR_TABLE header includes default label");
+    } else if (Strings.equal(mode, "is64")) {
+        def entry = interpreter.lean_st_acquire_is64();
+        requireRuntime(entry.length == STEntry_Is64.size && machine.frame.stp == old_stp + STEntry_Is64.size, "is64 acquisition cursor");
+        requireRuntime(!interpreter.lean_st_load_is64(entry), "CALL_INDIRECT table32 field");
+    }
+    requireRuntime(machine.codeptr.pos == old_pc, "acquisition changed bytecode position");
+    machine.frame.stp = old_stp;
+    System.puts("sidetable ok: "); System.puti(table.length); System.ln();
+    interpreter.dispatch();
+    match (interpreter.get_stack().peek()) {
+        I32(value) => {
+            requireRuntime(i32.view(value) == expected, "unexpected result");
+            System.puts("stack top: "); System.puti(i32.view(value)); System.ln();
+        }
+        _ => System.error("Lean interpreter runtime test", "expected i32 result");
+    }
+}

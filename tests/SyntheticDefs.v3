@@ -247,65 +247,65 @@ def UNLEM_IMPOSSIBLE_ASSIGNMENT_BUNDLE() {
 // branch lattice that grows sharply after unLEM.
 // Fails in: unLEM.
 // Symptom: scheduler blows up with HeapOverflow before checker results.
-// def UNTANGLE_BRAID_LIMIT_STRESS() {
-// 	var c1 = pop_u32();
-// 	var c2 = pop_u32();
-// 	var c3 = pop_u32();
-// 	var c4 = pop_u32();
-// 	var p = u32.!=(c1, 0);
-// 	var q = u32.!=(c2, 0);
-// 	var r = u32.!=(c3, 0);
-// 	var s = u32.!=(c4, 0);
+def UNTANGLE_BRAID_LIMIT_STRESS() {
+	var c1 = pop_u32();
+	var c2 = pop_u32();
+	var c3 = pop_u32();
+	var c4 = pop_u32();
+	var p = u32.!=(c1, 0);
+	var q = u32.!=(c2, 0);
+	var r = u32.!=(c3, 0);
+	var s = u32.!=(c4, 0);
 
-// 	var seed = pop_u32();
+	var seed = pop_u32();
 
-// 	var a: u32 = 0;
-// 	if (p) {
-// 		if (q) {
-// 			a = u32.+(seed, 1);
-// 		} else {
-// 			a = 10;
-// 		}
-// 	} else {
-// 		if (r) {
-// 			a = u32.+(seed, 2);
-// 		} else {
-// 			a = 20;
-// 		}
-// 	}
+	var a: u32 = 0;
+	if (p) {
+		if (q) {
+			a = u32.+(seed, 1);
+		} else {
+			a = 10;
+		}
+	} else {
+		if (r) {
+			a = u32.+(seed, 2);
+		} else {
+			a = 20;
+		}
+	}
 
-// 	var b: u32 = 0;
-// 	if (q) {
-// 		if (r) {
-// 			b = u32.+(a, 1);
-// 		} else {
-// 			b = u32.+(seed, 3);
-// 		}
-// 	} else {
-// 		if (s) {
-// 			b = u32.+(a, 2);
-// 		} else {
-// 			b = 30;
-// 		}
-// 	}
+	var b: u32 = 0;
+	if (q) {
+		if (r) {
+			b = u32.+(a, 1);
+		} else {
+			b = u32.+(seed, 3);
+		}
+	} else {
+		if (s) {
+			b = u32.+(a, 2);
+		} else {
+			b = 30;
+		}
+	}
 
-// 	var c: u32 = 0;
-// 	if (r) {
-// 		if (s) {
-// 			c = u32.+(b, 1);
-// 		} else {
-// 			c = u32.+(a, 3);
-// 		}
-// 	} else {
-// 		if (p) {
-// 			c = u32.+(b, 2);
-// 		} else {
-// 			c = u32.+(seed, 4);
-// 		}
-// 	}
+	var c: u32 = 0;
+	if (r) {
+		if (s) {
+			c = u32.+(b, 1);
+		} else {
+			c = u32.+(a, 3);
+		}
+	} else {
+		if (p) {
+			c = u32.+(b, 2);
+		} else {
+			c = u32.+(seed, 4);
+		}
+	}
 
-// 	push_u32(c);
-// }
+	push_u32(c);
+}
 
 def DOUBLE_TRUE_SHARED_POP() {
 	var c1 = pop_u32();

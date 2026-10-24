@@ -45,7 +45,8 @@ class Sea {
     }
 
     def dupNode(node: IRNode) -> IRNode {
-        def n = mkNode(node.op, node.state_deps, node.value_deps);
+        def n = mkNode(node.op, Arrays.dup(node.state_deps), Arrays.dup(node.value_deps));
+        n.control_deps = Arrays.dup(node.control_deps);
         if(node.var_data != null) n.var_data = VarData.new(Seas.uidl(node.var_data.sourceName), node.var_data.tipe, node.var_data.stage);
         return n;
     }
@@ -70,6 +71,8 @@ class Sea {
                 result = ImmNodeSets.single(node)
                     .union(cachedTransitiveDepsPhiAware(cond))
                     .union(branch_common);
+                for (dep in node.control_deps)
+                    result = result.union(cachedTransitiveDepsPhiAware(dep));
             }
             _ => {
                 def r = [ImmNodeSets.single(node)];
@@ -336,7 +339,7 @@ class Sea {
 
         for (i < allNodes.length) {
             def node = allNodes[i];
-            if (IROp.Lit.?(node.op)) continue;
+            if (IROp.Lit.?(node.op) && node.control_deps.length == 0) continue;
             node.applyDeps(fun (dep: IRNode) { dep.addChild(node); });
         }
     }
@@ -348,7 +351,8 @@ class Sea {
 
         def l_phi_aware = cachedTransitiveDepsPhiAware(l_branch);
         def r_phi_aware = cachedTransitiveDepsPhiAware(r_branch);
-        def frontier = cond_deps.union(l_phi_aware.intersection(r_phi_aware));
+        var frontier = cond_deps.union(l_phi_aware.intersection(r_phi_aware));
+        for (dep in node.control_deps) frontier = frontier.union(cachedTransitiveDeps(dep));
 
         def l_full = cachedTransitiveDeps(l_branch);
         def r_full = cachedTransitiveDeps(r_branch);
@@ -421,6 +425,8 @@ component Seas {
                     new_node.state_deps[j] = if(subgraph.has(dep), mapping[dep], dep);
                 }
             }
+            new_node.control_deps = Arrays.map(old_node.control_deps,
+                fun (dep: IRNode) => if(subgraph.has(dep), mapping[dep], dep));
         }
 
         def cloned = Vector<IRNode>.new();
@@ -454,6 +460,7 @@ component Seas {
                 new_node.value_deps[j] = mapping[old_node.value_deps[j]];
             for (j < old_node.state_deps.length) if (old_node.state_deps[j] != null)
                 new_node.state_deps[j] = mapping[old_node.state_deps[j]];
+            new_node.control_deps = Arrays.map(old_node.control_deps, fun (dep: IRNode) => mapping[dep]);
 
             if (old_node.var_data != null) {
                 new_node.var_data = VarData.new(
@@ -503,6 +510,7 @@ class IRNode {
 
     var value_deps: Array<IRNode>;
     var state_deps: Array<IRNode>; // idx = statecomp.tag
+    var control_deps: Array<IRNode> = []; // completion controls; not operator arguments
     var children: Vector<IRNode> = Vector.new();
     var childSet: ImmNodeSet = ImmNodeSets.empty();
 
@@ -517,7 +525,7 @@ class IRNode {
     def deps() -> Array<IRNode> #inline {
         // should be empty, special case is to remove null state deps
         if (IROp.Start.?(op)) return dedup(value_deps);
-        else return dedup(Arrays.concat(value_deps, state_deps));
+        else return dedup(Arrays.concat(Arrays.concat(value_deps, state_deps), control_deps));
     }
 
     def applyDeps(f: IRNode -> void) #inline {
@@ -535,6 +543,14 @@ class IRNode {
             var dup = false;
             for (v in value_deps) if (v != null && v.id == d.id) { dup = true; break; }
             if (!dup) for (j < i) if (state_deps[j] != null && state_deps[j].id == d.id) { dup = true; break; }
+            if (!dup) f(d);
+        }
+        for (i < control_deps.length) {
+            def d = control_deps[i];
+            var dup = false;
+            for (v in value_deps) if (v == d) { dup = true; break; }
+            if (!dup) for (s in state_deps) if (s == d) { dup = true; break; }
+            if (!dup) for (j < i) if (control_deps[j] == d) { dup = true; break; }
             if (!dup) f(d);
         }
     }
@@ -563,6 +579,8 @@ class IRNode {
 
         for (i < state_deps.length)
             if (state_deps[i] != null && state_deps[i].id == from.id) state_deps[i] = to;
+        for (i < control_deps.length)
+            if (control_deps[i] == from) control_deps[i] = to;
     }
 
     def init_move(sea: Sea) -> bool {
@@ -586,16 +604,19 @@ class IRNode {
         var_data = other.var_data;
         value_deps = other.value_deps;
         state_deps = other.state_deps;
+        control_deps = other.control_deps;
         for (i < children.length) {
             def child = children[i];
             for (j < child.value_deps.length) if (child.value_deps[j] == this) child.value_deps[j] = other;
             for (j < child.state_deps.length) if (child.state_deps[j] == this) child.state_deps[j] = other;
+            for (j < child.control_deps.length) if (child.control_deps[j] == this) child.control_deps[j] = other;
         }
         children = other.children;
         childSet = other.childSet;
     }
 
     def graph_eq(rhs: IRNode) -> DiffResult {
+        // Compare value/state semantics; scheduling may strengthen control edges.
         // Unwrap Move nodes to compare underlying values
         def lhs = this.unwrapMove();
         def rhs_unwrapped = rhs.unwrapMove();

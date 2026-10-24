@@ -145,6 +145,14 @@ def main(args: Array<string>) {
 	}
 	trace_opcodes = trace_args.copy();
 	def filter_args = opcode_args.copy();
+	var run_cuts = filter_args.length == 0;
+	for (arg in filter_args) if (Strings.equal(arg, "CONTROL_CUT")) run_cuts = true;
+	if (run_cuts) {
+		ScheduleCuts.run();
+		total_tests += ScheduleCuts.total_tests;
+		total_pass += ScheduleCuts.total_pass;
+		total_fail += ScheduleCuts.total_fail;
+	}
 
 	// Load and test synthetic opcodes.
 	def v3bytes = System.fileLoad(SYNTHETIC_V3);

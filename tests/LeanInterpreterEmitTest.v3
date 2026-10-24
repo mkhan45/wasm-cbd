@@ -1,0 +1,64 @@
+// Emit executable tests for Target joins and simultaneous copies.
+def main(args: Array<string>) {
+    def operations = Strings.newMap<ScheduledOp>();
+    operations["trap"] = ScheduledOp.new("trapUnreachable", [], null);
+    operations["push"] = ScheduledOp.new("sink", ["u32"], null);
+    operations["raw-plus"] = ScheduledOp.new("u32.+", ["u32", "u32"], "u32");
+    operations["identity"] = ScheduledOp.new("id", ["u32"], "u32");
+    operations["plus"] = ScheduledOp.new("U32_plus", ["u32", "u32"], "u32");
+    if (args.length > 0 && Strings.equal(args[0], "bad-read")) {
+        def bad = "(sea-result 1 (graphs (graph \"bad\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (block none (instructions (instruction none 0 (app \"push\" 99)))))))))";
+        ScheduledMethodEmitter.new(ScheduledCFG.read(bad)[0], operations).build();
+        System.error("test", "unassigned read was accepted");
+        return;
+    }
+    operations["view32"] = ScheduledOp.new("u32.view", ["int"], "u32");
+    operations["view8"] = ScheduledOp.new("u8.view", ["u32"], "u8");
+    operations["wide32"] = ScheduledOp.new("u32.view", ["u8"], "u32");
+    operations["equals"] = ScheduledOp.new("u32.==", ["u32", "u32"], "bool");
+    operations["signed"] = ScheduledOp.new("U32_lt_s", ["u32", "u32"], "bool");
+    operations["mark"] = ScheduledOp.new("casts_ok", [], null);
+    operations["snapshot"] = ScheduledOp.new("check_snapshot", ["u32"], null);
+    operations["after-trap"] = ScheduledOp.new("should_not_run", [], null);
+    // Min/max stay runtime calls, preserving the runtime's NaN/signed-zero policy.
+    operations["minimum"] = ScheduledOp.new("F32_min", ["float", "float"], "float");
+    operations["maximum"] = ScheduledOp.new("F64_max", ["double", "double"], "double");
+    def floatEmitter = ScheduledMethodEmitter.new(ScheduledGraph.new("unused", -1, "trap", []), operations);
+    floatEmitter.bind(0, "float"); floatEmitter.bind(1, "float");
+    ScheduledCFG.require(Strings.equal(floatEmitter.application(ScheduledReader.new("(app \"minimum\" 0 1)").document()), "F32_min(v0, v1)"), "float minimum call changed");
+    floatEmitter.bind(2, "double"); floatEmitter.bind(3, "double");
+    ScheduledCFG.require(Strings.equal(floatEmitter.application(ScheduledReader.new("(app \"maximum\" 2 3)").document()), "F64_max(v2, v3)"), "float maximum call changed");
+    // The shared continuation swaps both value and Boolean locals. Each arm
+    // supplies one control value; the second control value dominates the split.
+    def fixture = "(sea-result 1 (graphs (graph \"diamond\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (block 1 (instructions (instruction none 0 (const \"u32\" \"11u\")) (instruction none 1 (const \"u32\" \"22u\")) (instruction none 2 (const \"bool\" \"true\"))))) (node 1 (set-bool 2 1 false)) (node 2 (branch (value 2) 3 4 10)) (node 3 (set-bool 5 0 true)) (node 4 (set-bool 5 0 false)) (node 5 (moves 6 (values (0 1) (1 0)) (controls (0 1) (1 0)) (states))) (node 6 (branch (boolean 1) 7 10 10)) (node 7 (branch (not (boolean 0)) 8 10 10)) (node 8 (block none (instructions (instruction none 3 (app \"push\" 0)) (instruction none 4 (app \"push\" 1)) (instruction none 5 (app \"plus\" 0 1)) (instruction none 6 (app \"push\" 5))))) (node 9 (trap)) (node 10 (trap))))))";
+    def graph = ScheduledCFG.read(fixture)[0];
+    def code = ScheduledMethodEmitter.new(graph, operations).build();
+    ScheduledCFG.require(count(code, "sink(v0);") == 1, "shared continuation duplicated");
+    ScheduledCFG.require(count(code, "def t5_1: u32 = v1;") == 1, "value source snapshot missing");
+    ScheduledCFG.require(count(code, "def t16_2: bool = c0;") == 1, "control source snapshot missing");
+    def casts = ScheduledMethodEmitter.new(ScheduledCFG.read("(sea-result 1 (graphs (graph \"casts\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (block 1 (instructions (instruction none 0 (const \"int\" \"-1\")) (instruction none 1 (app \"view32\" 0)) (instruction none 2 (app \"view8\" 1)) (instruction none 3 (app \"wide32\" 2)) (instruction none 4 (const \"u32\" \"255u\")) (instruction none 5 (app \"equals\" 3 4)) (instruction none 6 (const \"u32\" \"0u\")) (instruction none 7 (app \"signed\" 1 6))))) (node 1 (branch (value 5) 2 4 4)) (node 2 (branch (value 7) 3 4 4)) (node 3 (block none (instructions (instruction none 8 (app \"mark\"))))) (node 4 (trap))))))")[0], operations).build();
+    def trap = ScheduledMethodEmitter.new(ScheduledCFG.read("(sea-result 1 (graphs (graph \"trap_guard\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (branch true 1 2 1)) (node 1 (trap)) (node 2 (block none (instructions (instruction none 0 (app \"after-trap\")))))))))")[0], operations).build();
+    ScheduledCFG.require(count(casts, "u8.view(") == 1 && count(casts, "U32_lt_s(") == 1, "conversion or signed helper changed");
+    def aliases = ScheduledMethodEmitter.new(ScheduledCFG.read("(sea-result 1 (graphs (graph \"alias_chain\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (block none (instructions (instruction none 0 (const \"u32\" \"11u\")) (instruction none 1 (const \"u32\" \"22u\")) (instruction none 2 (app \"raw-plus\" 0 1)) (instruction none 3 (app \"identity\" 2)) (instruction none 4 (app \"identity\" 3)) (instruction none 5 (app \"push\" 4)))))))))")[0], operations).build();
+    ScheduledCFG.require(count(aliases, "sink((v0 + v1));") == 1 && count(aliases, "var ") == 0, "immutable aliases or integer inline changed");
+    def snapshot = ScheduledMethodEmitter.new(ScheduledCFG.read("(sea-result 1 (graphs (graph \"mutable_alias\" (entry 0) (trap \"trap\" 9) (nodes (node 0 (block 1 (instructions (instruction none 0 (const \"u32\" \"11u\")) (instruction none 1 (app \"identity\" 0)) (instruction none 2 (const \"u32\" \"22u\"))))) (node 1 (moves 2 (values (0 2)) (controls) (states))) (node 2 (block none (instructions (instruction none 3 (app \"snapshot\" 1)))))))))")[0], operations).build();
+    // The generated program must observe 22,11,33 after the swap and reach the
+    // continuation through the copied true control.
+    System.puts("component Test {\n  var count = 0;\n  var trapped = false;\n  var after_trap = false;\n  var cast_checked = false;\n  var snapshot_checked = false;\n  def check_snapshot(v: u32) { if (v != 11u) System.error(\"test\", \"mutable alias changed its captured value\"); snapshot_checked = true; }\n  def trapUnreachable() { trapped = true; }\n  def should_not_run() { after_trap = true; }\n  def casts_ok() { cast_checked = true; }\n  def U32_lt_s(x: u32, y: u32) => i32.view(x) < i32.view(y);\n  def sink(value: u32) {\n    def expected = if(count == 0, 22u, if(count == 1, 11u, 33u));\n    if (value != expected) System.error(\"test\", \"parallel copy changed its source\");\n    count++;\n  }\n");
+    System.puts(code);
+    System.puts(casts);
+    System.puts(trap);
+    System.puts(aliases);
+    System.puts(snapshot);
+    System.puts("  def check() { diamond(); alias_chain(); mutable_alias(); casts(); if (!cast_checked || !snapshot_checked || trapped) System.error(\"test\", \"cast guard failed\"); trap_guard(); if (!trapped || after_trap) System.error(\"test\", \"trap continuation ran\"); if (count != 4) System.error(\"test\", \"lost continuation\"); }\n}\ndef main(args: Array<string>) { Test.check(); System.puts(\"Target emitter tests passed\\n\"); }\n");
+}
+
+def count(haystack: string, needle: string) -> int {
+    var count = 0;
+    for (i = 0; i + needle.length <= haystack.length; i++) {
+        var same = true;
+        for (j < needle.length) if (haystack[i + j] != needle[j]) same = false;
+        if (same) count++;
+    }
+    return count;
+}

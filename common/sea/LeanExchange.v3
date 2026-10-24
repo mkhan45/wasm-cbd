@@ -1,0 +1,169 @@
+class LeanExchangeGraph(name: string, sea: Sea) {
+    def original_count = sea.nodes_by_id.length;
+    def values = Vector<(IRNode, IRNode)>.new();
+    def states = Vector<(int, IRNode, IRNode)>.new();
+    def prefix = Vector<IRNode>.new();
+    var value_ids: Array<int>;
+    var state_ids: Array<Array<int>>;
+
+    def index() {
+        value_ids = Array<int>.new(sea.nodes_by_id.length);
+        state_ids = Array<Array<int>>.new(sea.nodes_by_id.length);
+        var next = 0;
+        for (node in sea.nodes_by_id.copy()) {
+            value_ids[node.id] = -1;
+            def ids = state_ids[node.id] = Array<int>.new(StateComponent.count);
+            for (i < ids.length) ids[i] = -1;
+            match (node.op) {
+                Start => {}
+                StatePhi(cs) => for (c in cs) ids[c.tag] = next++;
+                _ => {
+                    def id = value_ids[node.id] = next++;
+                    for (i < ids.length) ids[i] = id;
+                }
+            }
+        }
+    }
+
+    def ref(buf: StringBuilder, node: IRNode, state_index: int) {
+        if (node == null || IROp.Start.?(node.op)) { buf.puts("start"); return; }
+        def id = if(state_index < 0, value_ids[node.id], state_ids[node.id][state_index]);
+        if (id < 0) System.error("Sea exchange", "reference has no value for requested component");
+        buf.put1("%d", id);
+    }
+}
+
+class LeanExchange(outputType: IRNode -> string) {
+    def operations = Strings.newMap<ScheduledOp>();
+    def op_defs = Vector<IntrinsicTypedef>.new();
+    def op_keys = Vector<string>.new();
+
+    def op(node: IRNode) -> string {
+        def d = IROp.Intrinsic.!(node.op).defn;
+        def inputs = Arrays.map(node.value_deps, outputType);
+        def result = outputType(node);
+        for (i < op_keys.length) {
+            def old = operations[op_keys[i]];
+            if (!Strings.equal(old.name, d.name) || old.inputs.length != inputs.length) continue;
+            if (!same(old.output, result)) continue;
+            var equal = true;
+            for (j < inputs.length) if (!same(old.inputs[j], inputs[j])) equal = false;
+            if (equal && op_defs[i].reads == d.reads && op_defs[i].writes == d.writes) return op_keys[i];
+        }
+        def signature = StringBuilder.new();
+        quoted(signature, d.name); signature.putc('(');
+        for (t in inputs) { quoted(signature, t); signature.putc(','); }
+        signature.puts(")->"); if (result == null) signature.puts("none"); else quoted(signature, result);
+        signature.puts("/r"); for (c in d.reads) signature.put1("%d,", c.tag);
+        signature.puts("/w"); for (c in d.writes) signature.put1("%d,", c.tag);
+        def key = signature.toString();
+        operations[key] = ScheduledOp.new(d.name, inputs, result);
+        op_keys.put(key); op_defs.put(d);
+        return key;
+    }
+
+    def same(a: string, b: string) -> bool {
+        if (a == null || b == null) return a == b;
+        return Strings.equal(a, b);
+    }
+
+    def quoted(buf: StringBuilder, value: string) {
+        buf.putc(0x22);
+        for (c in value) {
+            if (c == 0x22 || c == '\\') buf.putc('\\').putc(c);
+            else if (c == '\n') buf.puts("\\n");
+            else if (c == '\r') buf.puts("\\r");
+            else if (c == '\t') buf.puts("\\t");
+            else buf.putc(c);
+        }
+        buf.putc(0x22);
+    }
+
+    def condition(buf: StringBuilder, graph: LeanExchangeGraph, node: IRNode) {
+        buf.puts("(to-ctl ");
+        graph.ref(buf, node, -1); buf.putc(')');
+    }
+
+    def stateDeps(buf: StringBuilder, graph: LeanExchangeGraph, node: IRNode) {
+        buf.puts("(states");
+        var reads = StateComponent.set.all;
+        match (node.op) { Intrinsic(d) => reads = d.reads; _ => {} }
+        for (c in reads) if (node.state_deps[c.tag] != null) {
+            def i = c.tag;
+            buf.puts(" (").put1("%d", i).putc(' '); graph.ref(buf, node.state_deps[i], i); buf.putc(')');
+        }
+        buf.putc(')');
+    }
+
+    def node(buf: StringBuilder, graph: LeanExchangeGraph, n: IRNode) {
+        if (IROp.Start.?(n.op)) return;
+        match (n.op) {
+            StatePhi(cs) => {
+                for (c in cs) {
+                    buf.puts(" (node ").put1("%d", graph.state_ids[n.id][c.tag]).puts(" (select-state ");
+                    condition(buf, graph, n.value_deps[0]); buf.putc(' ').put1("%d", c.tag).putc(' ');
+                    graph.ref(buf, n.value_deps[1], c.tag); buf.putc(' '); graph.ref(buf, n.value_deps[2], c.tag); buf.puts("))\n");
+                }
+                return;
+            }
+            _ => {}
+        }
+        buf.puts(" (node ").put1("%d", graph.value_ids[n.id]).putc(' ');
+        match (n.op) {
+            Lit(_, rep) => {
+                buf.puts("(const "); quoted(buf, outputType(n)); buf.putc(' ');
+                quoted(buf, if(Strings.equal(rep, "(void)"), "()", rep)); buf.putc(')');
+            }
+            Intrinsic(_) => {
+                buf.puts("(app "); quoted(buf, op(n)); buf.puts(" true "); stateDeps(buf, graph, n);
+                buf.puts(" (values");
+                for (v in n.value_deps) { buf.putc(' '); graph.ref(buf, v, -1); }
+                buf.puts("))");
+            }
+            Phi => {
+                buf.puts("(select-val "); condition(buf, graph, n.value_deps[0]); buf.putc(' ');
+                graph.ref(buf, n.value_deps[1], -1); buf.putc(' '); graph.ref(buf, n.value_deps[2], -1); buf.putc(')');
+            }
+            Finish => { buf.puts("(finish true "); stateDeps(buf, graph, n); buf.putc(')'); }
+            _ => System.error("Sea exchange", "unsupported graph node");
+        }
+        buf.puts(")\n");
+    }
+
+    def graph(buf: StringBuilder, g: LeanExchangeGraph) {
+        g.index();
+        buf.puts("(graph "); quoted(buf, g.name); buf.puts(" (finish "); g.ref(buf, g.sea.finish, -1); buf.puts(")\n (nodes\n");
+        for (i < g.original_count) node(buf, g, g.sea.nodes_by_id[i]);
+        buf.puts(")\n (rewrite (insert\n");
+        for (i = g.original_count; i < g.sea.nodes_by_id.length; i++) node(buf, g, g.sea.nodes_by_id[i]);
+        buf.puts(") (values");
+        for (v in g.values.copy()) { buf.puts(" ("); g.ref(buf, v.0, -1); buf.putc(' '); g.ref(buf, v.1, -1); buf.putc(')'); }
+        buf.puts(") (states");
+        for (s in g.states.copy()) {
+            buf.puts(" (").put1("%d", s.0).putc(' '); g.ref(buf, s.1, s.0); buf.putc(' '); g.ref(buf, s.2, s.0); buf.putc(')');
+        }
+        buf.puts(") (prefix"); for (p in g.prefix.copy()) { buf.putc(' '); g.ref(buf, p, -1); }
+        buf.puts(")))\n");
+    }
+
+    def request(graphs: Array<LeanExchangeGraph>) -> string {
+        def bodies = StringBuilder.new();
+        for (g in graphs) graph(bodies, g);
+        def buf = StringBuilder.new();
+        buf.puts("(sea-exchange 1 (language (states");
+        for (c in StateComponent) { buf.putc(' '); quoted(buf, Strings.format1("state%d", c.tag)); }
+        buf.puts(") (control-types \"bool\") (ops\n");
+        for (i < op_keys.length) {
+            def key = op_keys[i], d = op_defs[i], meta = operations[key];
+            buf.puts("(op "); quoted(buf, key); buf.puts(" (reads");
+            for (c in d.reads) buf.putc(' ').put1("%d", c.tag);
+            buf.puts(") (writes"); for (c in d.writes) buf.putc(' ').put1("%d", c.tag);
+            buf.puts(") (inputs"); for (t in meta.inputs) { buf.putc(' '); quoted(buf, t); }
+            buf.puts(") (output "); if (meta.output == null) buf.puts("none"); else quoted(buf, meta.output);
+            buf.puts(") (may-trap ").puts("true").puts("))\n");
+        }
+        buf.puts("(op \"exchange-trap\" (reads) (writes) (inputs) (output none) (may-trap true))) (trap \"exchange-trap\"))\n(graphs\n");
+        operations["exchange-trap"] = ScheduledOp.new("trapUnreachable", [], null);
+        return buf.puts(bodies.toString()).puts("))\n").toString();
+    }
+}

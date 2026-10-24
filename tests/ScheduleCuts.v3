@@ -1,0 +1,121 @@
+class CutFixture {
+    var sea = Sea.new();
+    var p: IRNode;
+    var q: IRNode;
+    var a: IRNode;
+    var b: IRNode;
+    var second: IRNode;
+
+    def node(op: IROp, name: string, args: Array<IRNode>) -> IRNode {
+        def n = sea.mkNode(op, Array.new(StateComponent.count), args);
+        n.var_data = VarData.new(name, TypeVar.U32, Stage.VALIDATE);
+        return n;
+    }
+
+    def phi(name: string, cond: IRNode, left: IRNode, right: IRNode) -> IRNode =>
+        node(IROp.Phi, name, [cond, left, right]);
+
+    new(effectful: bool) {
+        def seed = node(IROp.Lit(TypeVar.U32, "1"), "seed", []);
+        def k = node(IROp.Lit(TypeVar.U32, "2"), "k", []);
+        p = node(IROp.Intrinsic(Seas.intrinsic("u32.==")), "p", [seed, k]);
+        q = node(IROp.Intrinsic(Seas.intrinsic("u32.!=")), "q", [seed, k]);
+        def r = node(IROp.Intrinsic(Seas.intrinsic("u32.==")), "r", [k, seed]);
+        def s = node(IROp.Intrinsic(Seas.intrinsic("u32.!=")), "s", [k, seed]);
+        var value = seed;
+        if (effectful) {
+            value = node(IROp.Intrinsic(Seas.intrinsic("pop_u32")), "effect", []);
+            value.state_deps[StateComponent.Stack.tag] = sea.start;
+        }
+        a = phi("a", p, phi("aq", q, value, k), phi("ar", r, seed, k));
+        if (effectful) a = phi("effect_a", p, value, k);
+        def left = phi("br", r, a, seed);
+        def right = phi("bs", s, a, k);
+        b = phi("b", q, left, right);
+        second = phi("second", q, left, k);
+        sea.finish.value_deps = [b, second];
+        sea.rebuildChildren();
+    }
+}
+
+component ScheduleCuts {
+    var total_tests: int = 0;
+    var total_pass: int = 0;
+    var total_fail: int = 0;
+    def expect(name: string, ok: bool) {
+        total_tests++;
+        if (ok) total_pass++;
+        else total_fail++;
+        System.puts(Strings.format2("  %s  CONTROL_CUT_%s\n", if(ok, "PASS", "FAIL"), name));
+    }
+
+    def run() {
+        def f = CutFixture.new(false);
+        def scheduler = Scheduler.of_full_sea(f.sea);
+        scheduler.cut_depth_limit = 0;
+        def site = scheduler.find_next_untangle_site(scheduler.sea.cachedTransitiveDeps(scheduler.bottom_node));
+        expect("BRAID_FOUND", site != null && site.phis.length == 2);
+        if (site == null) return;
+        def original_q = scheduler.mapping[f.q];
+        def a = scheduler.mapping[f.a];
+        def b = scheduler.mapping[f.b];
+        def old_arm = b.value_deps[1];
+        def cut = scheduler.try_control_cut(site);
+        expect("GRAPH_REWRITE", cut && b.value_deps[0] != original_q &&
+            b.value_deps[0].control_deps.length == 1 && b.value_deps[0].control_deps[0] == a);
+        if (!cut) return;
+        def gated = b.value_deps[0];
+        expect("ORIGINAL_PREDICATE", original_q.control_deps.length == 0 &&
+            old_arm.value_deps[0] == original_q && a.value_deps[1].unwrapMove().value_deps[0] == original_q);
+        expect("SITE_REWIRED", scheduler.mapping[f.second].value_deps[0] == gated &&
+            b.value_deps[1].value_deps[0] == gated && b.value_deps[2].value_deps[0] == gated);
+        expect("START_CONTROL", a.control_deps.length == 1 && a.control_deps[0] == scheduler.top_node);
+        expect("ORDINARY_FRONTIER", scheduler.sea.branch_partition(b).frontier.has(a) &&
+            !scheduler.sea.branch_partition(b).l_subgraph.has(a) &&
+            !scheduler.sea.branch_partition(b).r_subgraph.has(a));
+        expect("PREDICATE_ORIGIN", scheduler.rootNode(gated) == f.q);
+
+        def clone = Seas.clone(scheduler.sea);
+        expect("CLONE_CONTROL", clone.1[gated].control_deps[0] == clone.1[a]);
+        def sub = Seas.cloneSubgraph(clone.0, ImmNodeSets.single(clone.1[gated]).with(clone.1[a]));
+        expect("SUBGRAPH_CONTROL", sub.1[clone.1[gated]].control_deps[0] == sub.1[clone.1[a]]);
+
+        scheduler.schedule();
+        var a_copies = 0;
+        for (n in scheduler.live.toVector().copy()) if (scheduler.rootNode(n) == f.a) a_copies++;
+        expect("SINGLE_SHARED_COPY", a_copies == 1);
+        def checker = ScheduleChecker.new(scheduler.top_block, scheduler.bottom_block,
+            scheduler.orig_sea, scheduler.sea, scheduler.mapping, scheduler.clone_to_orig);
+        checker.check();
+        expect("SCHEDULE", checker.errors.length == 0);
+        for (i < checker.errors.length) System.puts(Strings.format1("%q\n", checker.errors[i].render));
+
+        // A fresh scheduler must recover the same constraints from the graph alone.
+        def fresh = Scheduler.of_full_sea(scheduler.sea);
+        fresh.schedule();
+        def fresh_checker = ScheduleChecker.new(fresh.top_block, fresh.bottom_block,
+            fresh.orig_sea, fresh.sea, fresh.mapping, fresh.clone_to_orig);
+        fresh_checker.check();
+        expect("RESCHEDULE", fresh_checker.errors.length == 0);
+        for (i < fresh_checker.errors.length) System.puts(Strings.format1("%q\n", fresh_checker.errors[i].render));
+
+        def automatic = Scheduler.of_full_sea(f.sea);
+        automatic.schedule();
+        expect("DEPTH_TRIGGER", automatic.control_cut_count > 0);
+
+        def shallow = Scheduler.of_full_sea(f.sea);
+        shallow.cut_depth_limit = 100;
+        def shallow_site = shallow.find_next_untangle_site(shallow.sea.cachedTransitiveDeps(shallow.bottom_node));
+        expect("DEPTH_LIMIT", shallow.choose_control_cut(shallow_site) == null);
+
+        def effect = Scheduler.of_full_sea(CutFixture.new(true).sea);
+        effect.cut_depth_limit = 0;
+        def effect_site = effect.find_next_untangle_site(effect.sea.cachedTransitiveDeps(effect.bottom_node));
+        expect("CONDITIONAL_EFFECT", effect_site != null && effect.choose_control_cut(effect_site) == null);
+
+        def reading = IntrinsicTypedef.new("read_predicate", null, null, CBDEffect.None);
+        reading.reads = StateComponent.Memory;
+        def read_cond = f.node(IROp.Intrinsic(reading), "read_cond", []);
+        expect("STATEFUL_PREDICATE", !scheduler.can_duplicate_predicate(read_cond));
+    }
+}

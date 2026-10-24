@@ -36,6 +36,8 @@ component SeaRender {
                 buf.tab().puts(tag).putd(arg.id).puts(" --> ").puts(tag).putd(n.id).ln();
             }
             def state_set = Vector<(IRNode, StateComponent.set)>.new();
+            for (dep in n.control_deps)
+                buf.tab().puts(tag).putd(dep.id).puts(" -. control .-> ").puts(tag).putd(n.id).ln();
             for (sc in StateComponent.set.all) if (n.state_deps[sc.tag] != null) {
                 def dep = n.state_deps[sc.tag];
                 var idx = -1;
@@ -359,6 +361,11 @@ component SeaRender {
             buf.puts(")");
         }
         // Group state deps by source node.
+        for (dep in node.control_deps) {
+            buf.puts(" {control:");
+            renderNodeRef(dep, buf);
+            buf.puts("}");
+        }
         def state_set = Vector<(IRNode, StateComponent.set)>.new();
         for (sc in StateComponent.set.all) if (node.state_deps[sc.tag] != null) {
             def dep = node.state_deps[sc.tag];

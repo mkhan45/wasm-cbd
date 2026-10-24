@@ -59,6 +59,9 @@ class SeaScheduler {
 
     var branch_sites: Vector<BranchSite> = Vector.new();
     var branch_site_map: NodeMap<BranchSite> = NodeMap<BranchSite>.new();
+    var cut_depth_limit: int = 2; // cut shared phis at this nesting depth or deeper
+    var phi_depths: NodeMap<int> = NodeMap<int>.new();
+    var control_cut_count: int = 0;
 
     var reify_conds = false;
 
@@ -96,6 +99,85 @@ class SeaScheduler {
         def primary = mapping[root];
         if (primary != null) return primary.id == node.id;
         return root.id == node.id;
+    }
+
+    def conditional_write_set() -> ImmNodeSet {
+        def writes = [ImmNodeSets.empty()];
+        live.apply(fun (node: IRNode) {
+            if (!IROp.StatePhi.?(node.op)) return;
+
+            def left = sea.cachedTransitiveDeps(node.value_deps[1]);
+            def right = sea.cachedTransitiveDeps(node.value_deps[2]);
+            left.withoutAll(right).apply(sea, fun (dep: IRNode) {
+                if (has_writes(dep)) writes[0] = writes[0].with(dep);
+            });
+            right.withoutAll(left).apply(sea, fun (dep: IRNode) {
+                if (has_writes(dep)) writes[0] = writes[0].with(dep);
+            });
+        });
+        return writes[0];
+    }
+
+    def can_duplicate_predicate(cond: IRNode) -> bool {
+        match (cond.op) {
+            Intrinsic(defn) => {
+                def empty: StateComponent.set;
+                return defn.reads == empty && defn.writes == empty;
+            }
+            Lit => return true;
+            _ => return false;
+        }
+    }
+
+    def choose_control_cut(site: BranchSite) -> IRNode {
+        if (!can_duplicate_predicate(site.condition())) return null;
+
+        def conditional_writes = conditional_write_set();
+        def unconditional = sea.cachedTransitiveDepsPhiAware(bottom_node);
+        var best: IRNode = null;
+        var best_size = 0;
+        for (candidate in site.cloneable_overlap.toArray(sea)) {
+            if (!IROp.Phi.?(candidate.op)) continue;
+            if (phi_depths[candidate] < cut_depth_limit) continue;
+            def deps = sea.cachedTransitiveDeps(candidate);
+            if (deps.intersects(conditional_writes)) continue;
+            var safe = true;
+            for (dep in deps.toArray(sea))
+                if (has_writes(dep) && !unconditional.has(dep)) safe = false;
+            if (!safe) continue;
+            def size = deps.intersection(site.cloneable_overlap).count();
+            if (size > best_size) {
+                best = candidate;
+                best_size = size;
+            }
+        }
+        return best;
+    }
+
+    def try_control_cut(site: BranchSite) -> bool {
+        def node = choose_control_cut(site);
+        if (node == null) return false;
+        def cond = site.condition();
+        def gated = sea.dupNode(cond);
+        gated.control_deps = Arrays.concat(gated.control_deps, [node]);
+        clone_to_orig[gated] = rootNode(cond);
+        if (node.control_deps.length == 0) node.control_deps = [top_node];
+
+        // Only this site's predicate is re-gated; the cut may itself use cond.
+        for (j < site.phis.length) {
+            def phi = site.phis[j];
+            phi.value_deps[0] = gated;
+            for (i = 1; i < 3; i++) {
+                def arm = sea.dupNode(phi.value_deps[i]);
+                arm.replaceDep(cond, gated);
+                phi.value_deps[i] = arm;
+            }
+        }
+        sea.rebuildChildren();
+        sea.clearDepsCache();
+        control_cut_count++;
+        trace_print(fun => Strings.format2("control cut %q before predicate %q\n", node.render, gated.render));
+        return true;
     }
 
     // Compute a depth ordering of phis: outermost phis first.
@@ -139,12 +221,15 @@ class SeaScheduler {
         for (i < n) if (dep_count[i] == 0) queue.put(i);
 
         var idx = 0;
+        phi_depths = NodeMap<int>.new();
         while (idx < queue.length) {
             def cur = queue[idx];
             idx++;
             result.put(phis[cur]);
             for (k < dependents[cur].length) {
                 def dep = dependents[cur][k];
+                def depth = phi_depths[phis[cur]] + 1;
+                if (depth > phi_depths[phis[dep]]) phi_depths[phis[dep]] = depth;
                 dep_count[dep]--;
                 if (dep_count[dep] == 0) queue.put(dep);
             }
@@ -317,6 +402,15 @@ class SeaScheduler {
         }
 
         return ready;
+    }
+
+    def has_writes(node: IRNode) -> bool {
+        def mt_scs: StateComponent.set;
+        match (node.op) {
+            Intrinsic(defn) => return defn.writes > mt_scs;
+            _ => ;
+        }
+        return false;
     }
 
     def kill_transitive_demand(demand: ImmNodeSet, node: IRNode) -> ImmNodeSet {
@@ -503,6 +597,14 @@ class SeaScheduler {
                 n.value_deps[i] = new_dep;
             }
 
+            for (i < n.control_deps.length) {
+                def old_dep = n.control_deps[i];
+                if (!shared.has(old_dep)) continue;
+                def new_dep = mapping[old_dep];
+                replacements.put((old_dep, new_dep));
+                n.control_deps[i] = new_dep;
+            }
+
             for (i < n.state_deps.length) {
                 def old_dep = n.state_deps[i];
                 if (old_dep == null || !shared.has(old_dep)) continue;
@@ -535,19 +637,28 @@ class SeaScheduler {
 
     def untangle() {
         // var limit = branch_sites.length * 4; // XXX: idk if this is reasonable
-        var limit = 4;
+        var clone_limit = 4;
+        var cut_limit = 32;
         sea.clearDepsCache();
         var bottom_demand = sea.cachedTransitiveDeps(bottom_node);
-        while (limit > 0) {
+        while (clone_limit > 0 || cut_limit > 0) {
             def site = find_next_untangle_site(bottom_demand);
             if (site == null) break;
+
+            if (cut_limit > 0 && try_control_cut(site)) {
+                cut_limit -= 1;
+                bottom_demand = sea.cachedTransitiveDeps(bottom_node);
+                continue;
+            }
+
+            if (clone_limit <= 0) break;
 
             trace_print(fun => Strings.format2("untangle site for cond %q, support = %q\n", site.phis[0].value_deps[0].render, site.support.renderFull(_, sea)));
             trace_print(fun => Strings.format3("left_only: %q\nright_only: %q\ncloneable: %q\n", site.left_only.renderFull(_, sea), site.right_only.renderFull(_, sea), site.cloneable_overlap.renderFull(_, sea)));
 
             bottom_demand = untangle_site(site, bottom_demand);
             verify_bottom_demand(bottom_demand);
-            limit -= 1;
+            clone_limit -= 1;
         }
 
         branch_site_map = NodeMap<BranchSite>.new();

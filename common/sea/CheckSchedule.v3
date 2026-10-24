@@ -51,6 +51,9 @@ class ScheduleChecker {
             }
             phi: CFGPhi => {
                 var s = scope;
+                for (p = phi.phis; p != null; p = p.tail)
+                    for (dep in p.head.control_deps)
+                        if (!scope.has(dep)) errors.put(ScheduleError.UnsatNeed(p.head, dep));
                 for (p = phi.phis; p != null; p = p.tail) s = s.with(p.head);
                 return if (phi.next != null, check_top_down(phi.next, s), s);
             }
@@ -207,6 +210,7 @@ class ScheduleChecker {
                    effects: NodeSet, visited: NodeSet) {
         if (node == null || visited.has(node)) return;
         visited.put(node);
+        for (dep in node.control_deps) collect_graph_effs(dep, assignment, effects, visited);
         match (node.op) {
             Start => return;
             Phi => {
