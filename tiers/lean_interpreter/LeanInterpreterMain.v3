@@ -1,0 +1,22 @@
+def main(args: Array<string>) {
+    if (args.length == 0) { System.error("LeanInterpreter", "expected a Wasm file"); return; }
+    def filename = args[0];
+    def bytes = System.fileLoad(filename);
+    if (bytes == null) { System.error("LeanInterpreter", "cannot read Wasm file"); return; }
+    def extensions = Extension.set.all;
+    def parser = BinParser.new(extensions, Limits.new().set(extensions), ErrorGen.new(filename), filename);
+    def module = parser.push(bytes, 0, bytes.length).finish();
+    def instance = Instantiator.new(extensions, module, [], ErrorGen.new(filename)).run();
+    def arguments = Array<int>.new(args.length - 1);
+    for (i = 1; i < args.length; i++) arguments[i - 1] = Ints.parseDecimal(args[i], 0).1;
+    def interpreter = CBDLeanInterpreter.new(V3Interpreter.new());
+    interpreter.init(instance, arguments);
+    interpreter.dispatch();
+    System.puts("stack top: ");
+    match (interpreter.get_stack().peek()) {
+        I32(value) => System.puti(i32.view(value));
+        I64(value) => System.puts(Strings.format1("%d", i64.view(value)));
+        _ => System.puts("non-integer");
+    }
+    System.ln();
+}

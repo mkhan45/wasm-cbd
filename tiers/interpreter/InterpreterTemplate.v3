@@ -245,9 +245,11 @@ class CBDV3Interpreter(it: V3Interpreter) {
         def sidetable = it.frame.func.decl.cbd_sidetable;
         def index = if(key >= n_labels, int.view(n_labels)-1, int.view(key));
         it.frame.stp += (index * Sidetable_BrEntry.size);
-        it.frame.pc += index;
+        // Match put_BR_TABLE's per-entry origin and doBranch's consumed-entry cursor.
+        it.frame.pc += index + 1;
 
         def br_entry = Ref<Sidetable_BrEntry>.at(sidetable, it.frame.stp);
+        it.frame.stp += Sidetable_BrEntry.size;
         doBranch(br_entry);
     }
 
@@ -389,14 +391,15 @@ class CBDV3Interpreter(it: V3Interpreter) {
     }
 
     // Traps.
-    def invalid(); // should never occur
-    def trapNull();
-    def trapUnreachable();
-    def trapDivideByZero();
-    def trapDivideUnrepresentable();
-    def trapMem();
-    def trapTableOOB();
-    def trapFuncSigMismatch();
+    // These standalone tiers abort execution; they do not return a WasmStack result.
+    def invalid() { System.error("Wasm trap", "INVALID_OPCODE"); }
+    def trapNull() { System.error("Wasm trap", "NULL_DEREF"); }
+    def trapUnreachable() { System.error("Wasm trap", "UNREACHABLE"); }
+    def trapDivideByZero() { System.error("Wasm trap", "DIV_BY_ZERO"); }
+    def trapDivideUnrepresentable() { System.error("Wasm trap", "DIV_UNREPRESENTABLE"); }
+    def trapMem() { System.error("Wasm trap", "MEMORY_OOB"); }
+    def trapTableOOB() { System.error("Wasm trap", "TABLE_OOB"); }
+    def trapFuncSigMismatch() { System.error("Wasm trap", "FUNC_SIG_MISMATCH"); }
 
     def doBlock(bt: (Array<ValueType>, Array<ValueType>)) {
     }
@@ -524,6 +527,14 @@ class CBDV3Interpreter(it: V3Interpreter) {
         it.frame.stp += size;
         return sidetable[stp ... stp + size];
     }
+
+    // Shared by the Lean-scheduled tier; layouts stay with the validator.
+    def lean_st_acquire_label() -> Range<u8> => get_st_entry(STEntry_Label.size);
+    def lean_st_load_label(entry: Range<u8>) -> Ref<Sidetable_BrEntry> => Ref<STEntry_Label>.of(entry).label;
+    def lean_st_acquire_labels() -> Range<u8> => get_st_entry(STEntry_Labels.size);
+    def lean_st_load_labels(entry: Range<u8>) -> u32 => Ref<STEntry_Labels>.of(entry).labels;
+    def lean_st_acquire_is64() -> Range<u8> => get_st_entry(STEntry_Is64.size);
+    def lean_st_load_is64(entry: Range<u8>) -> bool => Ref<STEntry_Is64>.of(entry).is64;
 
     def renderStackOps(out: StringBuilder) -> StringBuilder {
         def numOperands = it.values.top - (it.frame.fp + it.frame.func.decl.num_locals);

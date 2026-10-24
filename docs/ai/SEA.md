@@ -58,6 +58,33 @@ Resolves shared subgraphs between branches. Uses `branch_partition` (on `Sea`) t
 
 Walks from `Finish` upward, placing each node into the lowest valid position in a `ScheduleNode` tree (composed of `ScheduleBlock`, `ScheduleBranch`, and `CFGPhi` nodes). `isReady` checks whether all of a node's live children have been scheduled (tracked via `DomGraph`). Phi nodes use grouped readiness: all children across the `BranchLattice` must be scheduled before any phi in the group is enqueued. When a phi becomes ready, `prependScheduleBranch` inserts a new `ScheduleBranch`/`CFGPhi` pair into the schedule tree.
 
+### Schedule cuts
+
+Before cloning an overlap, `SeaScheduler` may cut a shared value phi out of
+the branch site. It duplicates the site's pure predicate, adds a control edge
+from the shared phi to that predicate, and rewires the site's phis and their
+Move wrappers to use the duplicate. An unguarded shared phi also gets Start
+control. The original predicate remains available to the shared computation,
+which may itself depend on it.
+
+These are explicit `IRNode.control_deps` edges. Ordinary dependency traversal
+now puts the shared computation in the predicate's frontier, so untangling
+keeps one copy and bottom-up placement schedules it before the branch. No
+cut-specific frontier metadata is needed. Control edges survive graph cloning
+and appear in graph/info traces; the schedule checker verifies their ordering
+and follows them when comparing path effects.
+
+The heuristic considers shared phis at `cut_depth_limit` or deeper (default 2),
+using the outer-to-inner phi containment order. Among eligible phis it chooses
+the one covering the largest overlap. It rejects conditional writes and
+requires any write dependency to already be unconditionally demanded. Only
+literal predicates or intrinsics without reads or writes are duplicated; other
+cases retain ordinary untangling. The existing limits of 32 cuts and 4 cloning
+steps remain.
+
+Run the graph-rewrite regressions with `bash scripts/schedule_test.sh CONTROL_CUT`.
+They also run with the full synthetic suite.
+
 ### Move Nodes
 
 `IROp.Move(val)` nodes are inserted by the `addMoves` transform before scheduling. Each phi's condition node gets `move_true`/`move_false` children via `init_move`, which act as branch-side markers. The scheduler skips Move nodes during placement (they are not live) but uses them to associate values with their correct branch side. `CFGPhi.toSSAD` unwraps Move nodes when emitting phi assignments.

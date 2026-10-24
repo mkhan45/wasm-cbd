@@ -1,0 +1,426 @@
+class ScheduledPaths(normal: Array<int>, terminal: Array<int>) {}
+
+class ScheduledMethodEmitter(graph: ScheduledGraph, operations: HashMap<string, ScheduledOp>) {
+    def paths = Array<ScheduledPaths>.new(graph.nodes.length);
+    def active = Array<bool>.new(graph.nodes.length);
+    def visited = Array<bool>.new(graph.nodes.length);
+    def order = Vector<int>.new();
+    def types = HashMap<int, string>.new(int.!<int>, int.==);
+    def controls = HashMap<int, bool>.new(int.!<int>, int.==);
+    def valueCount = [0];
+    def aliases = HashMap<int, int>.new(int.!<int>, int.==);
+    var uses = HashMap<int, int>.new(int.!<int>, int.==);
+    def valueWrites = HashMap<int, int>.new(int.!<int>, int.==);
+    def controlWrites = HashMap<int, int>.new(int.!<int>, int.==);
+    def mutableValues = HashMap<int, bool>.new(int.!<int>, int.==);
+    def mutableControls = HashMap<int, bool>.new(int.!<int>, int.==);
+    def out = StringBuilder.new();
+
+    def contains(items: Array<int>, id: int) -> bool {
+        if (items != null) for (item in items) if (item == id) return true;
+        return false;
+    }
+    def common(left: Array<int>, right: Array<int>) -> Array<int> {
+        if (left == null) return right;
+        if (right == null) return left;
+        def shared = Vector<int>.new();
+        for (id in left) if (contains(right, id)) shared.put(id);
+        return shared.copy();
+    }
+    def prefix(id: int, rest: Array<int>) -> Array<int> {
+        if (rest == null) return null;
+        def result = Array<int>.new(rest.length + 1);
+        result[0] = id;
+        for (i < rest.length) result[i + 1] = rest[i];
+        return result;
+    }
+    def node(id: int) -> ScheduledExpr {
+        ScheduledCFG.require(id >= 0 && id < graph.nodes.length, "target edge outside graph");
+        return graph.nodes[id];
+    }
+    def analyze(id: int) -> ScheduledPaths {
+        if (id == -1) return ScheduledPaths.new([-1], [-1]);
+        def n = node(id);
+        if (paths[id] != null) return paths[id];
+        ScheduledCFG.require(!active[id], "cycle in target CFG");
+        active[id] = true;
+        var rest: ScheduledPaths;
+        if (n.tag("trap")) rest = ScheduledPaths.new(null, [-1]);
+        else if (n.tag("branch")) {
+            ScheduledCFG.require(n.list().length == 5, "malformed branch");
+            def left = analyze(n.list()[2].number());
+            def right = analyze(n.list()[3].number());
+            def bottom = node(n.list()[4].number());
+            ScheduledCFG.require(bottom.tag("trap"), "nontrapping Boolean bottom edge");
+            rest = ScheduledPaths.new(common(left.normal, right.normal), common(left.terminal, right.terminal));
+        } else {
+            ScheduledCFG.require(n.tag("block") || n.tag("moves") || n.tag("set-bool"), "unknown target node");
+            rest = analyze(n.list()[1].optional());
+        }
+        paths[id] = ScheduledPaths.new(prefix(id, rest.normal), prefix(id, rest.terminal));
+        active[id] = false;
+        order.put(id);
+        return paths[id];
+    }
+    def bind(id: int, ty: string) {
+        ScheduledCFG.require(ty != null && !Strings.equal(ty, "void"), "value has void type");
+        if (types.has(id)) ScheduledCFG.require(Strings.equal(types[id], ty), "inconsistent target value type");
+        else { types[id] = ty; valueCount[0]++; }
+    }
+    def tipe(id: int) -> string {
+        ScheduledCFG.require(types.has(id), "target value has no type");
+        return types[id];
+    }
+    def operation(name: string) -> ScheduledOp {
+        ScheduledCFG.require(operations.has(name), Strings.format1("unknown operation %s", name));
+        return operations[name];
+    }
+    def infer() {
+        def copies = Vector<ScheduledExpr>.new();
+        for (id in order.copy()) {
+            def n = node(id);
+            if (n.tag("block")) {
+                def instructions = n.field("instructions").list();
+                for (i = 1; i < instructions.length; i++) {
+                    def instruction = instructions[i].list();
+                    ScheduledCFG.require(instructions[i].tag("instruction") && instruction.length == 4, "malformed target instruction");
+                    def label = instruction[2].number();
+                    def rhs = instruction[3];
+                    if (rhs.tag("const")) { bind(label, rhs.list()[1].text()); valueWrites[label] = valueWrites[label] + 1; }
+                    else {
+                        ScheduledCFG.require(rhs.tag("app"), "unknown instruction RHS");
+                        def op = operation(rhs.list()[1].text());
+                        if (op.output != null) { bind(label, op.output); valueWrites[label] = valueWrites[label] + 1; }
+                    }
+                }
+            } else if (n.tag("moves")) {
+                def values = n.field("values").list();
+                for (i = 1; i < values.length; i++) { copies.put(values[i]); mutableValues[values[i].list()[0].number()] = true; }
+                def bools = n.field("controls").list();
+                for (i = 1; i < bools.length; i++) {
+                    controls[bools[i].list()[0].number()] = true;
+                    mutableControls[bools[i].list()[0].number()] = true;
+                    controls[bools[i].list()[1].number()] = true;
+                }
+            } else if (n.tag("set-bool")) {
+                def label = n.list()[2].number();
+                controls[label] = true;
+                controlWrites[label] = controlWrites[label] + 1;
+            }
+        }
+        for (pass = 0; pass <= copies.length; pass++) for (copy in copies.copy()) {
+            def dst = copy.list()[0].number(), src = copy.list()[1].number();
+            if (types.has(src)) bind(dst, types[src]);
+            if (types.has(dst)) bind(src, types[dst]);
+        }
+        for (copy in copies.copy()) { tipe(copy.list()[0].number()); tipe(copy.list()[1].number()); }
+        valueWrites.apply(fun (id: int, writes: int) { if (writes > 1) mutableValues[id] = true; });
+        controlWrites.apply(fun (id: int, writes: int) { if (writes > 1) mutableControls[id] = true; });
+        for (id in order.copy()) {
+            def n = node(id);
+            if (!n.tag("block")) continue;
+            def instructions = n.field("instructions").list();
+            for (i = 1; i < instructions.length; i++) {
+                def d = instructions[i].list(), rhs = d[3];
+                if (!rhs.tag("app") || !Strings.equal(operation(rhs.list()[1].text()).name, "id") || rhs.list().length != 3) continue;
+                def dst = d[2].number(), src = rhs.list()[2].number();
+                def op = operation(rhs.list()[1].text());
+                if (op.inputs.length == 1 && Strings.equal(op.inputs[0], tipe(src)) && !mutableValues.has(dst) && !mutableValues.has(src) && Strings.equal(tipe(dst), tipe(src))) aliases[dst] = src;
+            }
+        }
+        uses = HashMap<int, int>.new(int.!<int>, int.==);
+        for (id in order.copy()) {
+            def n = node(id);
+            if (n.tag("block")) {
+                def instructions = n.field("instructions").list();
+                for (i = 1; i < instructions.length; i++) {
+                    def d = instructions[i].list(), rhs = d[3];
+                    if (aliases.has(d[2].number()) || !rhs.tag("app")) continue;
+                    for (j = 2; j < rhs.list().length; j++) use(rhs.list()[j].number());
+                }
+            } else if (n.tag("branch")) countTestUses(n.list()[1]);
+            else if (n.tag("moves")) {
+                def values = n.field("values").list();
+                for (i = 1; i < values.length; i++) use(values[i].list()[1].number());
+            }
+        }
+    }
+    def resolve(id: int) -> int {
+        var result = id, fuel = 0;
+        while (aliases.has(result)) {
+            ScheduledCFG.require(fuel++ <= valueCount[0], "cyclic value aliases");
+            result = aliases[result];
+        }
+        return result;
+    }
+    def use(id: int) { def source = resolve(id); uses[source] = uses[source] + 1; }
+    def countTestUses(t: ScheduledExpr) {
+        if (t.tag("not")) countTestUses(t.list()[1]);
+        else if (t.tag("value")) use(t.list()[1].number());
+    }
+    def requireAvailable(available: Array<int>, label: int) {
+        ScheduledCFG.require(contains(available, label), "target local read before assignment");
+    }
+    def checkTest(t: ScheduledExpr, available: ScheduledPaths) {
+        if (t.atom != null) return;
+        if (t.tag("not")) { checkTest(t.list()[1], available); return; }
+        if (t.tag("value")) requireAvailable(available.normal, t.list()[1].number());
+        else if (t.tag("boolean")) requireAvailable(available.terminal, t.list()[1].number());
+        else ScheduledCFG.fail("invalid target test");
+    }
+    def propagate(incoming: Array<ScheduledPaths>, next: int, available: ScheduledPaths) {
+        if (next == -1) return;
+        def previous = incoming[next];
+        if (previous == null) incoming[next] = available;
+        else incoming[next] = ScheduledPaths.new(common(previous.normal, available.normal), common(previous.terminal, available.terminal));
+    }
+    def checkAvailability() {
+        if (graph.entry == -1) return;
+        def incoming = Array<ScheduledPaths>.new(graph.nodes.length);
+        incoming[graph.entry] = ScheduledPaths.new([], []);
+        for (idx = order.length - 1; idx >= 0; idx--) {
+            def id = order[idx];
+            def n = node(id);
+            def available = incoming[id];
+            ScheduledCFG.require(available != null, "invalid target traversal order");
+            var values = available.normal, bools = available.terminal;
+            if (n.tag("trap")) continue;
+            if (n.tag("branch")) {
+                checkTest(n.list()[1], available);
+                propagate(incoming, n.list()[2].number(), available);
+                propagate(incoming, n.list()[3].number(), available);
+                continue;
+            }
+            if (n.tag("block")) {
+                def instructions = n.field("instructions").list();
+                for (i = 1; i < instructions.length; i++) {
+                    def instruction = instructions[i].list(), rhs = instruction[3];
+                    var defines = true;
+                    if (rhs.tag("app")) {
+                        def app = rhs.list();
+                        for (j = 2; j < app.length; j++) requireAvailable(values, app[j].number());
+                        defines = operation(app[1].text()).output != null;
+                    }
+                    if (defines) values = prefix(instruction[2].number(), values);
+                }
+            } else if (n.tag("moves")) {
+                def moves = n.field("values").list(), controls = n.field("controls").list();
+                for (i = 1; i < moves.length; i++) requireAvailable(values, moves[i].list()[1].number());
+                for (i = 1; i < controls.length; i++) requireAvailable(bools, controls[i].list()[1].number());
+                for (i = 1; i < moves.length; i++) values = prefix(moves[i].list()[0].number(), values);
+                for (i = 1; i < controls.length; i++) bools = prefix(controls[i].list()[0].number(), bools);
+            } else if (n.tag("set-bool")) bools = prefix(n.list()[2].number(), bools);
+            propagate(incoming, n.list()[1].optional(), ScheduledPaths.new(values, bools));
+        }
+    }
+    def bindValue(id: int, rhs: string) -> string {
+        if (mutableValues.has(id)) return Strings.format2("%s = %s;", value(id), rhs);
+        return Strings.format3("def %s: %s = %s;", value(id), tipe(id), rhs);
+    }
+    def value(id: int) -> string => Strings.format1("v%d", resolve(id));
+    def control(id: int) -> string => Strings.format1("c%d", id);
+    def line(level: int, s: string) { for (i < level * 2) out.putc(' '); out.puts(s).ln(); }
+    def test(t: ScheduledExpr) -> string {
+        if (t.atom != null) {
+            ScheduledCFG.require(Strings.equal(t.atom, "true") || Strings.equal(t.atom, "false"), "invalid literal test");
+            return t.atom;
+        }
+        if (t.tag("not")) return Strings.format1("!(%s)", test(t.list()[1]));
+        def id = t.list()[1].number();
+        if (t.tag("value")) {
+            ScheduledCFG.require(Strings.equal(tipe(id), "bool"), "non-Boolean target value test");
+            return value(id);
+        }
+        ScheduledCFG.require(t.tag("boolean") && controls.has(id), "missing target Boolean control");
+        return control(id);
+    }
+    def application(rhs: ScheduledExpr) -> string => applicationWith(rhs, -1, null);
+    def applicationWith(rhs: ScheduledExpr, substitute: int, expression: string) -> string {
+        def parts = rhs.list();
+        def op = operation(parts[1].text());
+        ScheduledCFG.require(parts.length == op.inputs.length + 2, "target operation arity mismatch");
+        def args = Array<string>.new(op.inputs.length);
+        for (i < args.length) {
+            def id = parts[i + 2].number();
+            ScheduledCFG.require(Strings.equal(tipe(id), op.inputs[i]), Strings.format1("argument type mismatch for %s", op.name));
+            args[i] = if(resolve(id) == substitute, expression, value(id));
+        }
+        if (Strings.equal(op.name, "id")) { ScheduledCFG.require(args.length == 1, "invalid identity"); return args[0]; }
+        def split = Strings.splitOnChar(op.name, u8.==(_, '.'), -1);
+        var operator = split[split.length - 1];
+        // Canonical numeric helpers use prose names for the same primitive ops.
+        def numeric = Strings.startsWith(op.name, "U32_") || Strings.startsWith(op.name, "U64_") || Strings.startsWith(op.name, "F32_") || Strings.startsWith(op.name, "F64_") || Strings.startsWith(op.name, "U8_");
+        if (numeric) {
+            def parts = Strings.splitOnChar(op.name, u8.==(_, '_'), -1);
+            if (parts.length == 2) {
+                def prose = parts[1];
+                if (Strings.equal(prose, "plus")) operator = "+";
+                if (Strings.equal(prose, "minus")) operator = "-";
+                if (Strings.equal(prose, "times")) operator = "*";
+                if (Strings.equal(prose, "div")) operator = "/";
+                if (Strings.equal(prose, "equals")) operator = "==";
+                if (Strings.equal(prose, "lt")) operator = "<";
+                if (Strings.equal(prose, "lte")) operator = "<=";
+                if (Strings.equal(prose, "gt")) operator = ">";
+                if (Strings.equal(prose, "ge") || Strings.equal(prose, "gte")) operator = ">=";
+                if (Strings.equal(prose, "and")) operator = "&";
+                if (Strings.equal(prose, "or")) operator = "|";
+                if (Strings.equal(prose, "xor")) operator = "^";
+            }
+            if (Strings.endsWith(op.name, "_not_equals")) operator = "!=";
+        }
+        if (args.length == 1 && TierGen.containsStr(["+", "-", "~", "!"], operator)) return Strings.format2("(%s%s)", operator, args[0]);
+        if (args.length == 2 && TierGen.containsStr(["+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "&", "|", "^", "<<", ">>", ">>>", "&&", "||"], operator)) {
+            return Strings.format3("(%s %s %s)", args[0], operator, args[1]);
+        }
+        def buf = StringBuilder.new().puts(op.name).putc('(');
+        for (i < args.length) { if (i > 0) buf.puts(", "); buf.puts(args[i]); }
+        return buf.putc(')').toString();
+    }
+    def inlineable(first: ScheduledExpr, second: ScheduledExpr) -> bool {
+        def label = first.list()[2].number();
+        def rhs = first.list()[3], next = second.list()[3];
+        if (!rhs.tag("app") || !next.tag("app") || uses[label] != 1 || mutableValues.has(label)) return false;
+        def op = operation(rhs.list()[1].text());
+        if (!TierGen.containsStr(["u8", "u16", "u32", "u64", "int", "i32", "i64"], op.output)) return false;
+        def split = Strings.splitOnChar(op.name, u8.==(_, '.'), -1);
+        if (split.length != 2 || !TierGen.containsStr(["+", "-", "*", "~", "&", "|", "^", "<<", ">>", ">>>"], split[1])) return false;
+        var consumed = false;
+        for (i = 2; i < next.list().length; i++) if (resolve(next.list()[i].number()) == label) consumed = true;
+        if (!consumed) return false;
+        for (i = 2; i < rhs.list().length; i++) {
+            def arg = rhs.list()[i].number();
+            if (mutableValues.has(arg) || !Strings.equal(tipe(arg), op.output)) return false;
+        }
+        return true;
+    }
+    def instruction(level: int, instruction: ScheduledExpr, substitute: int, expression: string) {
+        def label = instruction.list()[2].number(), rhs = instruction.list()[3];
+        if (rhs.tag("const")) line(level, bindValue(label, rhs.list()[2].text()));
+        else {
+            def app = applicationWith(rhs, substitute, expression);
+            if (operation(rhs.list()[1].text()).output == null) line(level, Strings.format1("%s;", app));
+            else line(level, bindValue(label, app));
+        }
+    }
+    def moves(id: int, level: int, list: ScheduledExpr, bools: bool) {
+        def copies = list.list();
+        // Snapshot all sources before assigning any destinations, including cycles.
+        for (i = 1; i < copies.length; i++) {
+            def src = copies[i].list()[1].number();
+            def name = if(bools, control(src), value(src));
+            def ty = if(bools, "bool", tipe(src));
+            line(level, StringBuilder.new().puts(Strings.format3("def t%d_%d: %s", id, i, ty)).puts(Strings.format1(" = %s;", name)).toString());
+        }
+        for (i = 1; i < copies.length; i++) {
+            def dst = copies[i].list()[0].number();
+            def name = if(bools, control(dst), value(dst));
+            line(level, Strings.format3("%s = t%d_%d;", name, id, i));
+        }
+    }
+    def emit(id: int, stop: int, level: int) {
+        if (id == stop) return;
+        if (id == -1) { line(level, "return;"); return; }
+        def n = node(id);
+        if (n.tag("trap")) {
+            def op = operation(graph.trap);
+            ScheduledCFG.require(op.inputs.length == 0 && op.output == null, "invalid trap signature");
+            line(level, Strings.format1("%s();", op.name));
+            line(level, "return;");
+            return;
+        }
+        ScheduledCFG.require(!visited[id], "unstructured shared target continuation");
+        visited[id] = true;
+        if (n.tag("branch")) {
+            def left = n.list()[2].number(), right = n.list()[3].number();
+            def sharedNormal = common(paths[left].normal, paths[right].normal);
+            def shared = if(sharedNormal == null, common(paths[left].terminal, paths[right].terminal), sharedNormal);
+            def join = if(shared.length == 0, -1, shared[0]);
+            if (left != join || right != join) {
+                def condition = test(n.list()[1]);
+                if (left == join) {
+                    line(level, Strings.format1("if (!(%s)) {", condition));
+                    emit(right, join, level + 1);
+                } else {
+                    line(level, Strings.format1("if (%s) {", condition));
+                    emit(left, join, level + 1);
+                    if (right != join) { line(level, "} else {"); emit(right, join, level + 1); }
+                }
+                line(level, "}");
+            }
+            emit(join, stop, level);
+        } else {
+            if (n.tag("block")) {
+                def raw = n.field("instructions").list();
+                def filtered = Vector<ScheduledExpr>.new();
+                for (i = 1; i < raw.length; i++) if (!aliases.has(raw[i].list()[2].number())) filtered.put(raw[i]);
+                def instructions = filtered.copy();
+                var i = 0;
+                while (i < instructions.length) {
+                    if (i + 1 < instructions.length && inlineable(instructions[i], instructions[i + 1])) {
+                        instruction(level, instructions[i + 1], instructions[i].list()[2].number(), application(instructions[i].list()[3]));
+                        i += 2;
+                    } else { instruction(level, instructions[i], -1, null); i++; }
+                }
+            } else if (n.tag("moves")) {
+                moves(id, level, n.field("values"), false);
+                // Use a separate temporary namespace for the control copy list.
+                moves(graph.nodes.length + id, level, n.field("controls"), true);
+            } else if (n.tag("set-bool")) {
+                def literal = n.list()[3].text();
+                ScheduledCFG.require(Strings.equal(literal, "true") || Strings.equal(literal, "false"), "invalid set-bool");
+                def label = n.list()[2].number();
+                if (mutableControls.has(label)) line(level, Strings.format2("%s = %s;", control(label), literal));
+                else line(level, Strings.format2("def %s: bool = %s;", control(label), literal));
+            }
+            emit(n.list()[1].optional(), stop, level);
+        }
+    }
+    def build() -> string {
+        analyze(graph.entry);
+        infer();
+        checkAvailability();
+        out.puts("  def ").puts(graph.name).puts("() {\n");
+        // Sorted labels make generated output stable across map implementations.
+        def max = [-1];
+        types.apply(fun (id: int, ty: string) { if (id > max[0]) max[0] = id; });
+        for (id = 0; id <= max[0]; id++) if (types.has(id) && mutableValues.has(id)) line(2, Strings.format2("var %s: %s;", value(id), types[id]));
+        max[0] = -1;
+        controls.apply(fun (id: int, flag: bool) { if (id > max[0]) max[0] = id; });
+        for (id = 0; id <= max[0]; id++) if (controls.has(id) && mutableControls.has(id)) line(2, Strings.format1("var %s: bool;", control(id)));
+        emit(graph.entry, -1, 2);
+        out.puts("  }\n");
+        return out.toString();
+    }
+}
+
+component LeanInterpreterEmit {
+    def replace(text: string, from: string, to: string) -> string {
+        def out = StringBuilder.new();
+        var i = 0;
+        while (i < text.length) {
+            var matches = i + from.length <= text.length;
+            if (matches) for (j < from.length) if (text[i + j] != from[j]) matches = false;
+            if (matches) { out.puts(to); i += from.length; }
+            else out.putc(text[i++]);
+        }
+        return out.toString();
+    }
+    def emit(response: string, operations: HashMap<string, ScheduledOp>) -> string {
+        def graphs = ScheduledCFG.read(response);
+        def template = System.fileLoad("./tiers/interpreter/InterpreterTemplate.v3");
+        ScheduledCFG.require(template != null, "cannot read interpreter template");
+        var end = template.length;
+        while (end > 0 && template[end - 1] <= ' ') end--;
+        ScheduledCFG.require(end > 0 && template[end - 1] == '}', "interpreter template must end with class body");
+        var code = replace(Arrays.range(template, 0, end - 1), "CBDV3Interpreter", "CBDLeanInterpreter");
+        code = replace(code, "CBDWasmStack", "CBDLeanWasmStack");
+        def out = StringBuilder.new().puts("// GENERATED BY LeanInterpreterGen.v3 using Sea's scheduled Target CFG\n").puts(code).ln();
+        for (graph in graphs) out.puts(ScheduledMethodEmitter.new(graph, operations).build());
+        out.puts("  def build_dispatch_table() -> Array<void -> void> {\n");
+        out.puts("    var size = 0;\n    for (op in Opcode) if (op.tag >= size) size = op.tag + 1;\n    DISPATCH_TABLE = Array.new(size);\n");
+        for (graph in graphs) out.puts("    DISPATCH_TABLE[Opcode.").puts(graph.name).puts(".tag] = ").puts(graph.name).puts(";\n");
+        out.puts("    return DISPATCH_TABLE;\n  }\n}\n");
+        return out.toString();
+    }
+}

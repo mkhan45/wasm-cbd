@@ -1,0 +1,59 @@
+component LeanInterpreterGen {
+    def lower(defn: LeanInterpreterDef) -> LeanExchangeGraph {
+        def graph = LeanExchangeGraph.new(defn.opcode, defn.sea);
+        var previous = defn.sea.start;
+        for (field in defn.fields.copy()) {
+            var kind: string;
+            if (Strings.equal(field.0, "label")) kind = "label";
+            else if (Strings.equal(field.0, "labels")) kind = "labels";
+            else if (Strings.equal(field.0, "is64")) kind = "is64";
+            else { LeanInterpreterSpecialize.fail("Unsupported interpreter sidetable declaration"); return graph; }
+            def acquire = IntrinsicTypedef.new(Strings.format1("lean_st_acquire_%s", kind), [], LeanInterpreterSpecialize.tipe("Range<u8>.I"), CBDEffect.None);
+            acquire.reads = StateComponent.Extra; acquire.writes = StateComponent.Extra;
+            def deps = Array<IRNode>.new(StateComponent.count);
+            deps[StateComponent.Extra.tag] = previous;
+            def entry = defn.sea.mkNode(IROp.Intrinsic(acquire), deps, []);
+            entry.var_data = VarData.new("sidetable_entry", TypeVar.Bot("Range<u8>"), Stage.INTERPRET);
+            def load = IntrinsicTypedef.new(Strings.format1("lean_st_load_%s", kind), [LeanInterpreterSpecialize.tipe("Range<u8>.I")], LeanInterpreterSpecialize.tipe(if(Strings.equal(kind, "label"), "Label.I", if(Strings.equal(kind, "labels"), "Labels.I", "bool.I"))), CBDEffect.None);
+            def replacement = defn.sea.mkNode(IROp.Intrinsic(load), Array.new(StateComponent.count), [entry]);
+            replacement.var_data = VarData.new(field.0, load.return_type.primitive, Stage.INTERPRET);
+            graph.values.put((field.1, replacement)); graph.prefix.put(entry);
+            def original = IROp.Intrinsic.!(field.1.op).defn;
+            for (c in original.writes) graph.states.put((c.tag, field.1, if(field.1.state_deps[c.tag] == null, defn.sea.start, field.1.state_deps[c.tag])));
+            previous = entry;
+        }
+        if (previous != defn.sea.start) graph.states.put((StateComponent.Extra.tag, defn.sea.start, previous));
+        return graph;
+    }
+
+    def main(args: Array<string>) {
+        if (args.length < 1) { LeanInterpreterSpecialize.fail("usage: LeanInterpreterGen prepare [opcode ...] | emit RESPONSE"); return; }
+        LeanInterpreterSpecialize.init();
+        def defs = TierGen.extractDefsFromFile("./wizard-engine/src/bytecode/CanonicalDefs.v3", "./wizard-engine/src/bytecode/CanonicalDefs.v3.sexp", LeanInterpreterSpecialize.prepare);
+        def names = TierGen.extractInstrNames(System.fileLoad("./wizard-engine/src/bytecode/CanonicalDefs.v3"));
+        for (name in names) {
+            var count = 0;
+            for (d in defs) if (Strings.equal(d.opcode, name)) count++;
+            if (count != 1) { LeanInterpreterSpecialize.fail(Strings.format1("Missing or duplicate canonical opcode %s", name)); return; }
+        }
+        if (Strings.equal(args[0], "prepare")) for (i = 1; i < args.length; i++) {
+            if (!TierGen.containsStr(names, args[i])) { LeanInterpreterSpecialize.fail(Strings.format1("Unknown opcode %s", args[i])); return; }
+        }
+        def graphs = Vector<LeanExchangeGraph>.new();
+        for (d in defs) {
+            var selected = args.length < 2 || Strings.equal(args[0], "emit");
+            for (i = 1; i < args.length; i++) if (Strings.equal(args[i], d.opcode)) selected = true;
+            if (selected) graphs.put(lower(d));
+        }
+        def exchange = LeanExchange.new(LeanInterpreterSpecialize.output);
+        def request = exchange.request(graphs.copy());
+        if (Strings.equal(args[0], "prepare")) System.puts(request);
+        else if (Strings.equal(args[0], "emit") && args.length == 2) {
+            def response = System.fileLoad(args[1]);
+            if (response == null) { LeanInterpreterSpecialize.fail("Cannot read scheduled CFG response"); return; }
+            System.puts(LeanInterpreterEmit.emit(response, exchange.operations));
+        } else LeanInterpreterSpecialize.fail("Unknown Lean interpreter generator stage");
+    }
+}
+
+def main(args: Array<string>) { LeanInterpreterGen.main(args); }

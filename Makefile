@@ -46,12 +46,12 @@ $(DEFS).sexp: wizard-engine/src/bytecode/CanonicalDefs.v3
 $(SYNTHETIC_SEXP): $(SYNTHETIC_DEFS)
 	$(VIRGIL) -print-vst $(SYNTHETIC_DEFS) > $(SYNTHETIC_SEXP)
 
-ScheduleTest: $(SYNTHETIC_SEXP) $(COMMON_LIB) $(TYPEDEFS)
+ScheduleTest: $(SYNTHETIC_SEXP) $(COMMON_LIB) $(TYPEDEFS) tests/ScheduleTest.v3 tests/ScheduleCuts.v3
 	$(V3C) $(VIRGIL_STD)\
 		$(COMMON_LIB)\
 		$(ENGINE)\
 		$(WIZARD_UTIL)\
-		tests/ScheduleTest.v3
+		tests/ScheduleTest.v3 tests/ScheduleCuts.v3
 
 PartitionTest: $(SYNTHETIC_SEXP) $(COMMON_LIB) $(TYPEDEFS) common/sea/region/*.v3
 	$(V3C) $(VIRGIL_STD)\
@@ -134,6 +134,19 @@ generated/IntrinsicCompiler.v3: IntrinsicCompilerGen
 
 validator: generated/Validator.v3
 interpreter: generated/Interpreter.v3
+lean-interpreter:
+	python3 scripts/lean_interpreter.py generate
+
+LeanInterpreterMain: lean-interpreter
+	python3 scripts/lean_interpreter.py compile
+
+run_lean_interpreter: lean-interpreter
+	python3 scripts/lean_interpreter.py run $(ARGS)
+
+test-lean-interpreter: lean-interpreter
+	python3 scripts/lean_interpreter_test.py
+
+.PHONY: lean-interpreter run_lean_interpreter test-lean-interpreter
 compiler: generated/Compiler.v3
 abstract_interpreter: generated/AI.v3
 wizeng-slow: validator interpreter

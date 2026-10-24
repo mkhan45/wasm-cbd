@@ -1,0 +1,144 @@
+// The exchange reader preserves Target nodes; it does not rebuild or schedule Sea.
+class ScheduledOp(name: string, inputs: Array<string>, output: string) {}
+
+class ScheduledExpr(atom: string, elems: Array<ScheduledExpr>) {
+    def text() -> string {
+        ScheduledCFG.require(atom != null, "expected atom");
+        return atom;
+    }
+    def list() -> Array<ScheduledExpr> {
+        ScheduledCFG.require(elems != null, "expected list");
+        return elems;
+    }
+    def tag(name: string) -> bool => elems != null && elems.length > 0 && Strings.equal(elems[0].atom, name);
+    def field(name: string) -> ScheduledExpr {
+        for (e in list()) if (e.tag(name)) return e;
+        ScheduledCFG.fail(Strings.format1("missing field %s", name));
+        return null;
+    }
+    def number() -> int {
+        def s = text();
+        ScheduledCFG.require(s.length > 0, "empty number");
+        var n = 0;
+        for (c in s) {
+            ScheduledCFG.require(c >= '0' && c <= '9' && (n < 214748364 || (n == 214748364 && c <= '7')), "invalid node or label number");
+            n = n * 10 + int.!(c - '0');
+        }
+        return n;
+    }
+    def optional() -> int => if(Strings.equal(atom, "none"), -1, number());
+}
+
+class ScheduledReader(data: string) {
+    var pos = 0;
+    def whitespace() { while (pos < data.length && data[pos] <= ' ') pos++; }
+    def hex4() -> u32 {
+        var n = 0u;
+        for (i < 4) {
+            ScheduledCFG.require(pos < data.length, "unterminated unicode escape");
+            def c = data[pos++];
+            var d = -1;
+            if (c >= '0' && c <= '9') d = c - '0';
+            if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            ScheduledCFG.require(d >= 0, "invalid unicode escape");
+            n = n * 16u + u32.!(d);
+        }
+        return n;
+    }
+    def read() -> ScheduledExpr {
+        whitespace();
+        ScheduledCFG.require(pos < data.length, "unexpected end of exchange");
+        if (data[pos] == '(') {
+            pos++;
+            def items = Vector<ScheduledExpr>.new();
+            whitespace();
+            while (pos < data.length && data[pos] != ')') { items.put(read()); whitespace(); }
+            ScheduledCFG.require(pos < data.length, "unterminated exchange list");
+            pos++;
+            return ScheduledExpr.new(null, items.copy());
+        }
+        if (data[pos] == '\"') {
+            pos++;
+            def buf = StringBuilder.new();
+            while (pos < data.length && data[pos] != '\"') {
+                var c = data[pos++];
+                ScheduledCFG.require(c >= ' ', "control character in exchange string");
+                if (c == '\\') {
+                    ScheduledCFG.require(pos < data.length, "unterminated exchange escape");
+                    c = data[pos++];
+                    match (c) {
+                        'n' => buf.putc('\n');
+                        'r' => buf.putc('\r');
+                        't' => buf.putc('\t');
+                        'b' => buf.putc(8);
+                        'f' => buf.putc(12);
+                        '\"' => buf.putc('\"');
+                        '\\' => buf.putc('\\');
+                        '/' => buf.putc('/');
+                        'u' => {
+                            var point = hex4();
+                            if (point >= 0xD800u && point <= 0xDBFFu) {
+                                ScheduledCFG.require(pos + 2 <= data.length && data[pos] == '\\' && data[pos+1] == 'u', "missing low surrogate");
+                                pos += 2;
+                                def low = hex4();
+                                ScheduledCFG.require(low >= 0xDC00u && low <= 0xDFFFu, "invalid low surrogate");
+                                point = 0x10000u + (point - 0xD800u) * 1024u + low - 0xDC00u;
+                            }
+                            def bytes = Array<byte>.new(4);
+                            def count = Utf8.encode(point, bytes);
+                            ScheduledCFG.require(count > 0, "invalid unicode codepoint");
+                            buf.putr(bytes[0 ..+ count]);
+                        }
+                        _ => ScheduledCFG.fail("invalid exchange string escape");
+                    }
+                } else buf.putc(c);
+            }
+            ScheduledCFG.require(pos < data.length, "unterminated exchange string");
+            pos++;
+            return ScheduledExpr.new(buf.toString(), null);
+        }
+        def start = pos;
+        while (pos < data.length && data[pos] > ' ' && data[pos] != '(' && data[pos] != ')') pos++;
+        ScheduledCFG.require(pos > start, "invalid exchange atom");
+        return ScheduledExpr.new(Arrays.range(data, start, pos), null);
+    }
+    def document() -> ScheduledExpr {
+        def result = read();
+        whitespace();
+        ScheduledCFG.require(pos == data.length, "trailing exchange data");
+        return result;
+    }
+}
+
+class ScheduledGraph(name: string, entry: int, trap: string, nodes: Array<ScheduledExpr>) {}
+
+component ScheduledCFG {
+    def fail(message: string) {
+        System.error("scheduled CFG", message);
+    }
+    def require(condition: bool, message: string) { if (!condition) fail(message); }
+    def read(response: string) -> Array<ScheduledGraph> {
+        require(response != null, "missing exchange response");
+        def root = ScheduledReader.new(response).document();
+        require(root.tag("sea-result") && root.list().length == 3 && root.list()[1].number() == 1, "unsupported exchange response");
+        def graphs = root.field("graphs").list();
+        def result = Vector<ScheduledGraph>.new();
+        for (i = 1; i < graphs.length; i++) {
+            def g = graphs[i];
+            require(g.tag("graph"), "expected graph");
+            def raw = g.field("nodes").list();
+            def nodes = Array<ScheduledExpr>.new(raw.length - 1);
+            for (j = 1; j < raw.length; j++) {
+                def n = raw[j].list();
+                require(raw[j].tag("node") && n.length == 3, "expected target node");
+                def id = n[1].number();
+                require(id < nodes.length && nodes[id] == null, "duplicate or sparse target node");
+                nodes[id] = n[2];
+            }
+            for (n in nodes) require(n != null, "missing target node");
+            result.put(ScheduledGraph.new(g.list()[1].text(), g.field("entry").list()[1].optional(), g.field("trap").list()[1].text(), nodes));
+        }
+        return result.copy();
+    }
+}

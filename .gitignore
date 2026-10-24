@@ -9,4 +9,7 @@ PartitionTest
 *AI
 
 generated/*.v3~
+generated/LeanInterpreter.request.sexp
+generated/LeanInterpreter.schedule.sexp
+__pycache__/
 tests/SyntheticDefs.v3.sexp

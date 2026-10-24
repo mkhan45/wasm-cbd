@@ -1,0 +1,147 @@
+class LeanInterpreterDef(opcode: string, sea: Sea, fields: Vector<(string, IRNode)>) {}
+
+component LeanInterpreterSpecialize {
+    def fail(message: string) {
+        System.error("Lean interpreter", message);
+    }
+
+    def emptyStates() -> StateComponent.set { def result: StateComponent.set; return result; }
+
+    def tipe(s: string) -> IntrinsicType {
+        def parts = Strings.splitOnChar(s, u8.==(_, '.'), -1);
+        return IntrinsicType.new(TypeUtil.fromString(parts[0]), if(parts.length > 1 && Strings.equal(parts[1], "I"), Stage.INTERPRET, Stage.VALIDATE));
+    }
+
+    def setType(name: string, result: string) {
+        def d = Seas.intrinsic(name);
+        def replacement = IntrinsicTypedef.new(name, d.args, tipe(result), d.effect);
+        replacement.reads = d.reads; replacement.writes = d.writes;
+        IntrinsicTypes.add_def(name, replacement);
+    }
+
+    def init() {
+        IntrinsicTypes.init(IntrinsicTypes.TYPE_DEF_FILE);
+        // The interpreter profile must precede construction of the state edges.
+        for (p = Maps.keyList(IntrinsicTypes.intrinsic_types); p != null; p = p.tail) {
+            def d = IntrinsicTypes.intrinsic_types[p.head], n = d.name;
+            if (d.effect == CBDEffect.Ctl || d.effect == CBDEffect.Trap) d.reads = StateComponent.set.all;
+            if (d.effect == CBDEffect.Memory || d.effect == CBDEffect.Local || d.effect == CBDEffect.Global) d.reads |= d.writes;
+            if (d.effect == CBDEffect.Push) d.reads |= StateComponent.Stack;
+            if (Strings.equal(n, "getLocal")) { d.reads = StateComponent.Locals; d.writes = emptyStates(); }
+            if (Strings.equal(n, "getGlobal")) { d.reads = StateComponent.Globals; d.writes = emptyStates(); }
+            if (Strings.startsWith(n, "mach_readMemory")) d.reads |= StateComponent.Memory;
+            if (Strings.startsWith(n, "mach_readStructField")) d.reads |= StateComponent.Memory;
+            if (Strings.startsWith(n, "m_get") || Strings.equal(n, "i_getFunction")) d.reads |= StateComponent.Extra;
+            if (Strings.startsWith(n, "mach_readTable") || Strings.startsWith(n, "i_getTableFunction")) d.reads |= StateComponent.Tables;
+            if (Strings.startsWith(n, "mach_memory")) { d.reads |= StateComponent.Memory; d.writes |= StateComponent.Memory; }
+            if (Strings.startsWith(n, "mach_writeTable")) { d.reads |= StateComponent.Tables; d.writes |= StateComponent.Tables; }
+            if (Strings.equal(n, "object_New")) { d.reads = StateComponent.Stack | StateComponent.Memory; d.writes = d.reads; }
+            if (Strings.equal(n, "doBranch") || Strings.equal(n, "doSwitch")) {
+                d.reads = StateComponent.Codeptr | StateComponent.Stack;
+                d.reads |= StateComponent.Extra; d.writes = d.reads;
+            }
+            if (Strings.equal(n, "doFallthru") || Strings.equal(n, "doBlock") || Strings.equal(n, "doLoop") || Strings.equal(n, "doEnd") || Strings.equal(n, "doTry")) {
+                d.reads = emptyStates(); d.writes = emptyStates();
+            }
+            if (Strings.equal(n, "f_isAtEnd")) d.reads |= StateComponent.Codeptr;
+        }
+        setType("doIf", "Label.V"); setType("doElse", "Label.V");
+        setType("imm_readU8", "u8.V"); setType("imm_readU32", "u32.V"); setType("imm_readU64", "u64.V");
+        for (n in ["imm_readU32", "imm_readU64"]) {
+            def d = Seas.intrinsic(n); d.reads = StateComponent.Codeptr; d.writes = StateComponent.Codeptr;
+        }
+        for (n in ["U32_equals", "U32_not_equals", "U32_lt", "U32_lte", "U32_gt", "U32_ge", "U32_lt_s", "U32_le_s", "U32_gt_s", "U32_ge_s", "U64_equals", "U64_not_equals", "U64_lt", "U64_lte", "U64_gt", "U64_ge", "U64_lt_s", "U64_le_s", "U64_gt_s", "U64_ge_s", "F32_equals", "F32_not_equals", "F32_lt", "F32_lte", "F32_gt", "F32_gte", "F64_equals", "F64_not_equals", "F64_lt", "F64_lte", "F64_gt", "F64_gte", "object_isNull", "u8.==", "u8.!=", "u32.==", "u32.!=", "u32.<", "u32.<=", "u32.>", "u32.>=", "u64.==", "u64.!=", "u64.<", "u64.<=", "u64.>", "u64.>=", "double.==", "double.!=", "double.<", "double.<=", "double.>", "double.>=", "float.>=", "float.==", "float.!=", "float.<", "float.<=", "float.>"]) setType(n, "bool.I");
+        for (base in ["u8", "u16", "u32", "u64", "float", "double"]) {
+            for (op in ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"]) setType(Strings.format2("%s.%s", base, op), Strings.format1("%s.I", base));
+            for (op in ["==", "!=", "<", "<=", ">", ">="]) setType(Strings.format2("%s.%s", base, op), "bool.I");
+        }
+        for (n in ["bool.&&", "bool.||", "bool.!", "bool.==", "bool.!="]) setType(n, "bool.I");
+        setType("U32_wrap_u64", "u32.I");
+        for (n in ["U32_clz", "U32_ctz", "U32_extend16_s", "U32_extend8_s", "U32_popcnt", "U32_rem_s", "U32_rem_u", "U32_rotl", "U32_rotr", "U32_shl", "U32_shr_s", "U32_shr_u", "u32.view", "u32_reinterpret_f32"]) setType(n, "u32.I");
+        for (n in ["U64_clz", "U64_ctz", "U64_div_s", "U64_extend16_s", "U64_extend32_s", "U64_extend8_s", "U64_extend_i32_s", "U64_extend_i32_u", "U64_popcnt", "U64_rem_s", "U64_rem_u", "U64_rotl", "U64_rotr", "U64_shl", "U64_shr_s", "U64_shr_u", "u64.view", "u64_reinterpret_f64"]) setType(n, "u64.I");
+        for (n in ["float.abs", "float.round", "float.sqrt", "mach_readMemory32_f32", "mach_readMemory64_f32"]) setType(n, "float.I");
+        for (n in ["double.abs", "double.round", "double.sqrt", "mach_readMemory32_f64", "mach_readMemory64_f64"]) setType(n, "double.I");
+        for (n in ["mach_writeMemory32_f32", "mach_writeMemory64_f32"]) setType(n, "void.I");
+        for (n in ["mach_readMemory32_f32", "mach_readMemory64_f32", "mach_readMemory32_f64", "mach_readMemory64_f64", "mach_writeMemory32_f32", "mach_writeMemory64_f32"]) {
+            def d = Seas.intrinsic(n); d.reads = StateComponent.Memory;
+            if (Strings.startsWith(n, "mach_write")) d.writes = StateComponent.Memory;
+        }
+    }
+
+    def concrete(t: TypeVar) -> string {
+        match (t) {
+            U8 => return "u8";
+            U16 => return "u16";
+            U32 => return "u32";
+            U64 => return "u64";
+            F32 => return "float";
+            F64 => return "double";
+            V128 => return "v128";
+            Object => return "Object";
+            Bot(n) => {
+                if (n == null || Strings.equal(n, "bot")) { fail("Missing interpreter concrete type"); return null; }
+                if (Strings.equal(n, "void")) return null;
+                if (Strings.equal(n, "TypeVar")) return "()";
+                if (Strings.equal(n, "BlockType")) return "(Array<ValueType>, Array<ValueType>)";
+                if (Strings.equal(n, "Label")) return "Ref<Sidetable_BrEntry>";
+                if (Strings.equal(n, "Labels")) return "u32";
+                if (Strings.equal(n, "Signature")) return "HeapTypeDecl";
+                if (Strings.equal(n, "FieldOffset")) return "i32";
+                return n;
+            }
+        }
+    }
+
+    def output(node: IRNode) -> string {
+        match (node.op) {
+            Lit(t, _) => return if(concrete(t) == null, "()", concrete(t));
+            Intrinsic(d) => {
+                def n = d.name;
+                if (Strings.equal(n, "id")) return output(node.value_deps[0]);
+                if (d.return_type != null) return concrete(d.return_type.primitive);
+                fail(Strings.format1("Missing interpreter result type for %s", n));
+                return null;
+            }
+            Phi => return output(node.value_deps[1]);
+            _ => return null;
+        }
+    }
+
+    def countBinding(ir: SSAD, name: string) -> int {
+        match (ir) {
+            LetApp(n, _, _, rest) => return if(Strings.equal(n, name), 1, 0) + countBinding(rest, name);
+            LetLit(n, _, _, rest) => return if(Strings.equal(n, name), 1, 0) + countBinding(rest, name);
+            If(_, t, e, _, rest) => return countBinding(t, name) + countBinding(e, name) + countBinding(rest, name);
+            Match(_, _, _) => { fail("Match statements are unsupported in Lean interpreter input"); return 0; }
+            _ => return 0;
+        }
+    }
+
+    def preserveLiteralTypes(ir: SSAD, info: SSADSeaInfo) {
+        match (ir) {
+            LetLit(n, rep, t, rest) => {
+                if (Strings.equal(t, "int") || Strings.equal(t, "i32") || Strings.equal(t, "i64") || Strings.equal(t, "u8") || Strings.equal(t, "u16")) {
+                    info.let_origins[n].op = IROp.Lit(TypeVar.Bot(t), rep);
+                }
+                preserveLiteralTypes(rest, info);
+            }
+            LetApp(_, _, _, rest) => preserveLiteralTypes(rest, info);
+            If(_, t, e, _, rest) => { preserveLiteralTypes(t, info); preserveLiteralTypes(e, info); preserveLiteralTypes(rest, info); }
+            _ => {}
+        }
+    }
+
+    def prepare(opcode: string, stmt: VirgilStmt) -> LeanInterpreterDef {
+        def ir = SSAD_IR.from_virgil(stmt);
+        def built = Seas.ofSSADWithInfo(ir);
+        preserveLiteralTypes(ir, built.1);
+        def fields = Vector<(string, IRNode)>.new();
+        for (field in VirgilStmts.getSidetableFields(stmt).copy()) {
+            if (countBinding(ir, field.0) != 1) fail(Strings.format2("Ambiguous annotated declaration %s.%s", opcode, field.0));
+            def origin = built.1.let_origins[field.0];
+            if (origin == null) fail("Missing annotated declaration origin");
+            fields.put((field.0, origin));
+        }
+        return LeanInterpreterDef.new(opcode, built.0, fields);
+    }
+}

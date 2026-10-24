@@ -1297,24 +1297,6 @@ def STRUCT_NEW() {
 	def sig = m_getSignature(struct_idx);
 	push_Object(object_New(sig));
 }
-def STRUCT_GET() {
-	def struct_index = imm_readULEB32();
-	def obj = pop_Object();
-	def field_index = imm_readULEB32();
-	trapNull();
-}
-def STRUCT_GET_S() {
-	def struct_index = imm_readULEB32();
-	def obj = pop_Object();
-	def field_index = imm_readULEB32();
-	trapNull();
-}
-def STRUCT_GET_U() {
-	def struct_index = imm_readULEB32();
-	def obj = pop_Object();
-	def field_index = imm_readULEB32();
-	trapNull();
-}
 def build_dispatch_table() -> Array<void -> void> {
   DISPATCH_TABLE = Array.new(0xE5 + 1);
   for (i < 0xE5 + 1) DISPATCH_TABLE[i] = null;
@@ -1495,9 +1477,6 @@ def build_dispatch_table() -> Array<void -> void> {
   DISPATCH_TABLE[Opcode.REF_IS_NULL.tag] = REF_IS_NULL;
   DISPATCH_TABLE[Opcode.REF_AS_NON_NULL.tag] = REF_AS_NON_NULL;
   DISPATCH_TABLE[Opcode.STRUCT_NEW.tag] = STRUCT_NEW;
-  DISPATCH_TABLE[Opcode.STRUCT_GET.tag] = STRUCT_GET;
-  DISPATCH_TABLE[Opcode.STRUCT_GET_S.tag] = STRUCT_GET_S;
-  DISPATCH_TABLE[Opcode.STRUCT_GET_U.tag] = STRUCT_GET_U;
   return DISPATCH_TABLE;
 }
 var module: Module;

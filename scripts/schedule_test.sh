@@ -3,6 +3,7 @@
 # Usage:
 #   bash scripts/schedule_test.sh                           # test all synthetic opcodes
 #   bash scripts/schedule_test.sh SPLIT_BRANCHES            # test specific opcode(s)
+#   bash scripts/schedule_test.sh CONTROL_CUT               # test explicit control cuts
 #   bash scripts/schedule_test.sh --canonical               # test synthetic + canonical opcodes
 #   bash scripts/schedule_test.sh --canonical i32_add       # test specific canonical opcode
 #   bash scripts/schedule_test.sh --trace i32_add           # enable trace_full for one opcode
@@ -29,7 +30,7 @@ WIZARD="./wizard-engine"
 ENGINE="$WIZARD/src/engine/*.v3 $WIZARD/src/engine/continuation/BoxedContinuation.v3"
 WIZARD_UTIL="$WIZARD/src/util/*.v3"
 
-SOURCES="$VIRGIL_STD common/*.v3 common/*/*.v3 $ENGINE $WIZARD_UTIL tests/ScheduleTest.v3"
+SOURCES="$VIRGIL_STD common/*.v3 common/*/*.v3 $ENGINE $WIZARD_UTIL tests/ScheduleTest.v3 tests/ScheduleCuts.v3"
 
 if [ "$PROFILE" = "true" ]; then
   VIRGIL="${VIRGIL:-../virgil/bin/current/x86-64-linux/Aeneas -profile -O2 -run -fun-exprs -simple-bodies}"

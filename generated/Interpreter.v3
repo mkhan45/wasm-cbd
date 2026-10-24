@@ -1997,88 +1997,6 @@ def STRUCT_NEW() {
 	def sig = m_getSignature(struct_idx);
 	push_Object(object_New(sig));
 }
-def STRUCT_GET() {
-	def sidetable_entry_bytes = get_st_entry(STEntry_KindOffset.size);
-	def sidetable_entry = Ref<STEntry_KindOffset>.of(sidetable_entry_bytes);
-	def struct_index = imm_readULEB32();
-	def field_index = imm_readULEB32();
-	def obj = pop_Object();
-	def cond = object_isNull(obj);
-	if (cond) {
-		trapNull();
-	}
-	match (sidetable_entry.kind) {
-		U32 => {
-			def arg = mach_readStructField_u32(obj, sidetable_entry.offset);
-			push_u32(arg);
-		}
-		U64 => {
-			def arg1 = mach_readStructField_u64(obj, sidetable_entry.offset);
-			push_u64(arg1);
-		}
-		F32 => {
-			def arg2 = mach_readStructField_f32(obj, sidetable_entry.offset);
-			push_f32(arg2);
-		}
-		F64 => {
-			def arg3 = mach_readStructField_f64(obj, sidetable_entry.offset);
-			push_f64(arg3);
-		}
-		V128 => {
-			def arg4 = mach_readStructField_v128(obj, sidetable_entry.offset);
-			push_v128(arg4);
-		}
-		REF => {
-			def arg5 = mach_readStructField_Object(obj, sidetable_entry.offset);
-			push_Object(arg5);
-		}
-		_ => trapUnreachable();
-	}
-}
-def STRUCT_GET_S() {
-	def sidetable_entry_bytes = get_st_entry(STEntry_KindOffset.size);
-	def sidetable_entry = Ref<STEntry_KindOffset>.of(sidetable_entry_bytes);
-	def struct_index = imm_readULEB32();
-	def field_index = imm_readULEB32();
-	def obj = pop_Object();
-	def cond = object_isNull(obj);
-	if (cond) {
-		trapNull();
-	}
-	match (sidetable_entry.kind) {
-		U8 => {
-			def arg = mach_readStructField_u8(obj, sidetable_entry.offset);
-			push_u32(u32.view(arg));
-		}
-		U16 => {
-			def arg1 = mach_readStructField_u16(obj, sidetable_entry.offset);
-			push_u32(u32.view(arg1));
-		}
-		_ => trapUnreachable();
-	}
-}
-def STRUCT_GET_U() {
-	def sidetable_entry_bytes = get_st_entry(STEntry_KindOffset.size);
-	def sidetable_entry = Ref<STEntry_KindOffset>.of(sidetable_entry_bytes);
-	def struct_index = imm_readULEB32();
-	def field_index = imm_readULEB32();
-	def obj = pop_Object();
-	def cond = object_isNull(obj);
-	if (cond) {
-		trapNull();
-	}
-	match (sidetable_entry.kind) {
-		U8 => {
-			def arg = mach_readStructField_u8(obj, sidetable_entry.offset);
-			push_u32(u32.view(arg));
-		}
-		U16 => {
-			def arg1 = mach_readStructField_u16(obj, sidetable_entry.offset);
-			push_u32(u32.view(arg1));
-		}
-		_ => trapUnreachable();
-	}
-}
 def build_dispatch_table() -> Array<void -> void> {
   DISPATCH_TABLE = Array.new(0xE5 + 1);
   for (i < 0xE5 + 1) DISPATCH_TABLE[i] = null;
@@ -2259,9 +2177,6 @@ def build_dispatch_table() -> Array<void -> void> {
   DISPATCH_TABLE[Opcode.REF_IS_NULL.tag] = REF_IS_NULL;
   DISPATCH_TABLE[Opcode.REF_AS_NON_NULL.tag] = REF_AS_NON_NULL;
   DISPATCH_TABLE[Opcode.STRUCT_NEW.tag] = STRUCT_NEW;
-  DISPATCH_TABLE[Opcode.STRUCT_GET.tag] = STRUCT_GET;
-  DISPATCH_TABLE[Opcode.STRUCT_GET_S.tag] = STRUCT_GET_S;
-  DISPATCH_TABLE[Opcode.STRUCT_GET_U.tag] = STRUCT_GET_U;
   return DISPATCH_TABLE;
 }
 }
