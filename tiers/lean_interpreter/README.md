@@ -18,6 +18,43 @@ make LeanInterpreterMain
 make run_lean_interpreter ARGS='path/to/program.wasm'
 ```
 
+To run PolyBench through Wizard's normal CLI and host modules:
+
+```sh
+make wizeng-verified
+scripts/run_polybench.sh --verified bicg
+```
+
+Set `POLYBENCH_DIR` if the suite is outside the script's default location.
+This target produces `wizard-engine/bin/wizeng-verified.x86-64-linux`, registers
+`--mode=cbd-verified`, and uses the portable V3 runtime. It does not use CBD's
+separate FastInt tier. `--verified` always selects this x86-64 build;
+`--fast` has no additional effect.
+`LeanInterpreterTarget.v3` follows the existing `CBDTarget.v3` integration:
+the CBD validator creates each function's sidetable during Wizard validation,
+then calls execute through `CBDLeanInterpreter`. The build driver links Wizard
+sources directly with the generated validator and interpreter; no generated
+sources need to be copied into the Wizard submodule.
+
+`--verified` cannot be combined with `--cbd=false`. Benchmark results go to
+`generated/benches-verified.tsv`, separate from the existing tiers.
+The flag names the Lean Sea pipeline; the proof limits below still apply.
+Run `python3 scripts/run_polybench_test.py` to check tier selection and failure
+handling without building or timing real benchmarks.
+
+To compare the entire PolyBench suite against Wizard's native fast interpreter:
+
+```sh
+make wizeng-verified wizeng-reference
+python3 scripts/check_polybench.py --jobs 8
+```
+
+This compares final linear memory byte-for-byte, stdout, stderr, and successful
+exit status against `--mode=int`. Both binaries include a monitor that snapshots
+memory after execution without changing the bytecode. See
+[the testing guide](../../docs/ai/TESTING.md#compare-against-wizards-fast-interpreter)
+for limits, selected benchmarks, and saved failure artifacts.
+
 The script also exposes separate stages, useful while debugging:
 
 ```sh

@@ -11,5 +11,6 @@ PartitionTest
 generated/*.v3~
 generated/LeanInterpreter.request.sexp
 generated/LeanInterpreter.schedule.sexp
+generated/polybench-checks/
 __pycache__/
 tests/SyntheticDefs.v3.sexp

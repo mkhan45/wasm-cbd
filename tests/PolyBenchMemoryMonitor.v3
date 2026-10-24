@@ -1,0 +1,34 @@
+// Snapshot after execution without inserting bytecode probes.
+def memory_monitor = MonitorRegistry.add("polybench-memory",
+    "Dump final linear memories for differential testing.", PolyBenchMemoryMonitor.new());
+def memory_output = memory_monitor.options.newStringOption("output", null, "snapshot file");
+
+class PolyBenchMemoryMonitor extends Monitor {
+    def onFinish(instance: Instance, result: Result) {
+        if (memory_output.val == null) System.error("memory snapshot", "missing output path");
+        def fd = System.fileOpen(memory_output.val, false);
+        if (fd < 0) System.error("memory snapshot", "could not open output");
+        writeAll(fd, "WIZARD-MEMORY-1\n");
+        writeAll(fd, Strings.format1("%d\n", instance.memories.length));
+        for (memory in instance.memories) {
+            writeAll(fd, Strings.format1("%d\n", memory.num_bytes));
+            var pos = 0uL;
+            while (pos < memory.num_bytes) {
+                def end = if(pos + 65536 < memory.num_bytes, pos + 65536, memory.num_bytes);
+                writeAll(fd, memory.getReadWriteAlias64(pos, end));
+                pos = end;
+            }
+        }
+        writeAll(fd, "END\n");
+        System.fileClose(fd);
+    }
+
+    private def writeAll(fd: int, data: Range<byte>) {
+        var pos = 0;
+        while (pos < data.length) {
+            def count = System.write(fd, data[pos ...]);
+            if (count <= 0) System.error("memory snapshot", "write failed");
+            pos += count;
+        }
+    }
+}

@@ -7,7 +7,66 @@ Use `scripts/run_polybench.sh` for performance testing with the polybench suite:
 ```bash
 bash scripts/run_polybench.sh jacobi-1d.wasm   # run a specific benchmark
 bash scripts/run_polybench.sh --list            # list all available benchmarks
-bash scripts/run_polybench.sh --show-output     # debug failures
+bash scripts/run_polybench.sh --verbose jacobi-1d  # show the command
+make wizeng-verified
+bash scripts/run_polybench.sh --verified jacobi-1d
+```
+
+`--verified` selects the Lean-scheduled CBD interpreter, runs the existing CBD
+validator to build its sidetables, and records timings in separate
+`generated/benches-verified.tsv`. This tier always uses x86-64; `--fast` has no
+additional effect. Set `POLYBENCH_DIR` to override
+the suite location. See [the tier documentation](../../tiers/lean_interpreter/README.md)
+for runtime and proof limits.
+
+Check script routing with `python3 scripts/run_polybench_test.py`. After building,
+include the actual Wizard adapter tests with:
+
+```bash
+LEAN_WIZARD_BINARY=wizard-engine/bin/wizeng-verified.x86-64-linux python3 scripts/run_polybench_test.py
+```
+
+### Compare against Wizard's fast interpreter
+
+```bash
+make wizeng-verified wizeng-reference
+python3 scripts/check_polybench.py --jobs 8                 # entire suite
+python3 scripts/check_polybench.py --jobs 8 bicg jacobi-1d   # selected benchmarks
+```
+
+The reference is Wizard's native x86-64 `--mode=int`, built as
+`wizard-engine/bin/wizeng-reference.x86-64-linux`. The other execution uses
+`--mode=cbd-verified`. Both builds include `tests/PolyBenchMemoryMonitor.v3`,
+which dumps every linear memory after execution without inserting bytecode
+probes. The runner compares memory sizes and bytes exactly, stdout (including
+any printed return value), stderr, and exit status. Both executions must exit
+successfully; matching failures, timeouts, and missing snapshots do not pass.
+PolyBench normally keeps its numeric results in memory and suppresses their
+printing, so comparing exit codes alone would not check the computed arrays.
+
+The runner accepts `POLYBENCH_DIR` or `--suite PATH`. `--jobs N` bounds concurrent
+interpreter processes: each worker runs its reference and verified executions
+in sequence. The default is one worker; use eight on this machine. Each execution
+has a 120-second timeout and a 1024 MiB writable-allocation limit, configurable
+with `--timeout` and `--memory-mib`. The native reference gets an additional
+8 GiB of address space for its inaccessible Wasm guard mapping; its writable
+allocation limit stays the same. Compiler builds still use the shared lock and
+4 GiB limit.
+
+Each run writes `summary.tsv`, commands, exit statuses, and stdout/stderr under
+`generated/polybench-checks/run-*`. Failed comparisons retain both memory dumps
+and report the first differing byte in each memory. Successful dumps are removed
+unless `--keep-memory` is specified. `--output-dir PATH` selects a new output
+directory. The command continues through failures and exits nonzero if any check
+fails. This compares all final linear memory, including scratch space; it does
+not check tables or globals, and programs using nondeterministic host inputs can
+differ even when both interpreters are correct.
+
+Runner regressions, including silent memory corruption and timeout detection:
+
+```bash
+python3 scripts/check_polybench_test.py
+POLYBENCH_INTEGRATION=1 python3 scripts/check_polybench_test.py
 ```
 
 ## Scheduler Quick Check

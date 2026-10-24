@@ -1,0 +1,8 @@
+benchmark	mean_s	stddev_s
+2mm.wasm	4.530	N/A
+3mm.wasm	7.900	N/A
+adi.wasm	8.610	N/A
+atax.wasm	0.170	N/A
+bicg.wasm	0.130	N/A
+durbin.wasm	0.070	N/A
+jacobi-1d.wasm	0.020	N/A

@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -o pipefail
 
 show_help() {
     cat << EOF
@@ -10,6 +11,8 @@ OPTIONS:
     --help              Show this help message
     --list              List all available benchmarks
     --fast              Use optimized wizeng binary (x86-64-linux)
+    --verified          Use the Lean-scheduled CBD interpreter (always x86-64)
+                        saves to benches-verified.tsv; --fast has no effect
     --cbd=(true|false)  Run in CBD mode (default: true)
                         true: uses CBD interpreter, saves to benches-{slow,fast}.tsv
                         false: uses base wizard interpreter, saves to benches-{slow,fast}-base.tsv
@@ -30,6 +33,7 @@ EXAMPLES:
     run_polybench.sh bicg
     run_polybench.sh bicg.wasm
     run_polybench.sh --fast gemm
+    run_polybench.sh --verified bicg
 EOF
 }
 
@@ -41,7 +45,7 @@ record_result() {
 
     # Create TSV header if file doesn't exist
     if [ ! -f "$TSV" ]; then
-        echo "benchmark\tmean_s\tstddev_s" > "$TSV"
+        printf 'benchmark\tmean_s\tstddev_s\n' > "$TSV"
     fi
 
     # Check if benchmark already exists in the file
@@ -66,12 +70,13 @@ if [ "$(basename "$PWD")" = "scripts" ]; then
 fi
 
 # Use environment variable or default path
-POLYBENCH="${POLYBENCH_DIR:-../wish-you-were-fast/wasm/suites/polybench}"
+POLYBENCH="${POLYBENCH_DIR:-../../wish-you-were-fast/wasm/suites/polybench}"
 
 # Default settings
 WIZENG="./wizard-engine/bin/wizeng.x86-linux"
 FAST=false
 CBD=true
+VERIFIED=false
 VERBOSE=0
 MAX_RUNS=10
 TIME_CMD=""
@@ -96,6 +101,10 @@ while [ $# -gt 0 ]; do
         --fast)
             WIZENG="./wizard-engine/bin/wizeng.x86-64-linux"
             FAST=true
+            shift
+            ;;
+        --verified)
+            VERIFIED=true
             shift
             ;;
         --cbd=*)
@@ -132,10 +141,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+BUILD_CMD="make wizeng-slow"
+if "$FAST"; then BUILD_CMD="make wizeng-fast"; fi
+if "$VERIFIED"; then
+    if ! "$CBD"; then
+        echo "Error: --verified cannot be combined with --cbd=false"
+        exit 1
+    fi
+    WIZENG="./wizard-engine/bin/wizeng-verified.x86-64-linux"
+    BUILD_CMD="make wizeng-verified"
+fi
+
 if [ ! -f "$WIZENG" ]; then
     echo "Error: wizeng binary not found at $WIZENG"
-    BUILD_CMD="make wizeng-slow"
-    if "$FAST"; then BUILD_CMD="make wizeng-fast"; fi
     echo "To build it, run: $BUILD_CMD"
     exit 1
 fi
@@ -178,6 +196,10 @@ if [ "$CBD" = true ]; then
         TSV_FILE="generated/benches-slow.tsv"
     fi
     MODE_ARG="--mode=cbd-int"
+    if "$VERIFIED"; then
+        TSV_FILE="generated/benches-verified.tsv"
+        MODE_ARG="--mode=cbd-verified"
+    fi
 else
     if [ "$FAST" = true ]; then
         TSV_FILE="generated/benches-fast-base.tsv"
@@ -218,6 +240,11 @@ if [ "$USE_HYPERFINE" = true ]; then
     # Capture hyperfine output while still printing it (force seconds as unit)
     TEMP_OUTPUT=$(mktemp)
     hyperfine --time-unit second --min-runs 1 --max-runs "$MAX_RUNS" "$CMD" | tee "$TEMP_OUTPUT"
+    STATUS=$?
+    if [ "$STATUS" -ne 0 ]; then
+        rm "$TEMP_OUTPUT"
+        exit "$STATUS"
+    fi
 
     # Extract mean and stddev from output
     # Format with multiple runs: "Time (mean ± σ):      1.234 s ±  0.567 s"
@@ -239,6 +266,11 @@ else
     # Use /usr/bin/time with format to output elapsed time in seconds
     TEMP_OUTPUT=$(mktemp)
     /usr/bin/time -f "Elapsed: %e seconds" $CMD 2>&1 | tee "$TEMP_OUTPUT"
+    STATUS=$?
+    if [ "$STATUS" -ne 0 ]; then
+        rm "$TEMP_OUTPUT"
+        exit "$STATUS"
+    fi
 
     # Extract time from output and format to 3 decimal places
     ELAPSED=$(grep "^Elapsed:" "$TEMP_OUTPUT" | awk '{printf "%.3f", $2}')

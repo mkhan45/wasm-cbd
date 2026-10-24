@@ -115,18 +115,56 @@ def runtime_sources():
             GENERATED / "LeanInterpreter.v3", TIER / "LeanInterpreterMain.v3"]
 
 
+def compile_wizard(reference=False):
+    wizard = ROOT / "wizard-engine"
+    if reference:
+        files = shared_sources()
+        for directory in ("native", "compiler", "x86-64"):
+            files.extend(sources(f"wizard-engine/src/engine/{directory}/*.v3"))
+        files.extend(sorted((VIRGIL / "lib/asm/x86-64").glob("*.v3")))
+        files.append(wizard / "src/engine/x86-64/continuation/X86_64BoxedContinuation.v3")
+    else:
+        # The Lean tier uses Wizard's portable V3 runtime.
+        files = [p for p in runtime_sources() if p.name != "LeanInterpreterMain.v3"]
+        files.append(TIER / "LeanInterpreterTarget.v3")
+    for directory in ("modules", "modules/wizeng", "modules/wave", "modules/wasi",
+                      "modules/wali", "monitors"):
+        files.extend(sources(f"wizard-engine/src/{directory}/*.v3"))
+    files.extend([wizard / "src/WasmMode.v3", wizard / "src/wizeng.main.v3",
+                  ROOT / "tests/PolyBenchMemoryMonitor.v3"])
+    target = "x86-64-linux"
+    files.extend(sources("wizard-engine/src/modules/wasi/x86-64-linux/*.v3"))
+    files.extend(sources("wizard-engine/src/modules/wali/x86-64-linux/*.v3"))
+    files.extend(sorted((VIRGIL / "lib/wasm-linux").glob("*.v3")))
+    files.append(VIRGIL / "lib/x86-64-linux/SyscallLayouts.v3")
+    binary = f"wizeng-{'reference' if reference else 'verified'}.{target}"
+    result = run([VIRGIL / f"bin/v3c-{target}", "-O2", "-symbols",
+                  "-heap-size=512m", "-stack-size=2m", "-fun-exprs", "-simple-bodies",
+                  "-redef-field=FeatureDisable.unboxedConts=true",
+                  f"-program-name={binary}", f"-output={wizard / 'bin'}/", *files])
+    print(result.stdout, end="")
+    print(f"Built wizard-engine/bin/{binary}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     gen = commands.add_parser("generate")
     gen.add_argument("opcodes", nargs="*")
-    commands.add_parser("compile")
+    compile_cmd = commands.add_parser("compile")
+    wizard_choice = compile_cmd.add_mutually_exclusive_group()
+    wizard_choice.add_argument("--wizard", action="store_true", help="build the Wizard CLI")
+    wizard_choice.add_argument("--wizard-reference", action="store_true",
+                               help="build Wizard's native fast interpreter with the memory monitor")
     execute = commands.add_parser("run")
     execute.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command == "generate":
         generate(args.opcodes)
     elif args.command == "compile":
+        if args.wizard or args.wizard_reference:
+            compile_wizard(reference=args.wizard_reference)
+            return
         result = run([VIRGIL / "bin/v3c-x86-64-linux", "-O2", "-fun-exprs",
                       "-simple-bodies", *runtime_sources()])
         print(result.stdout, end="")

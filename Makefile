@@ -147,6 +147,16 @@ test-lean-interpreter: lean-interpreter
 	python3 scripts/lean_interpreter_test.py
 
 .PHONY: lean-interpreter run_lean_interpreter test-lean-interpreter
+
+wizeng-verified: lean-interpreter
+	python3 scripts/lean_interpreter.py compile --wizard
+
+.PHONY: wizeng-verified
+
+wizeng-reference:
+	python3 scripts/lean_interpreter.py compile --wizard-reference
+
+.PHONY: wizeng-reference
 compiler: generated/Compiler.v3
 abstract_interpreter: generated/AI.v3
 wizeng-slow: validator interpreter

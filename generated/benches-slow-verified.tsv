@@ -1,0 +1,2 @@
+benchmark	mean_s	stddev_s
+bicg.wasm	0.141	0.011

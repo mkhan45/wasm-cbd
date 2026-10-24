@@ -1,0 +1,42 @@
+// Wizard's CBD validation hooks, with the Lean-scheduled execution tier.
+component CBDLeanTarget {
+    var unused_ = ExecuteOptions.registerMode("cbd-verified", CBDLeanInterpreterStrategy.new(), "CBD interpreter scheduled by Lean Sea");
+}
+
+class CBDLeanInterpreterStrategy extends ExecutionStrategy {
+    def interpreter = CBDLeanInterpreter.new(V3Interpreter.new());
+
+    def onCodeSectionStart(module: Module, num_funcs: u32, size: u32) {
+        Validator.init(module, []);
+    }
+
+    def onFuncValidationFinish(module: Module, func: FuncDecl, err: ErrorGen) {
+        if (err.error()) return;
+        Validator.init_function(func.orig_bytecode, TypeVars.args_from_decl(func),
+            TypeVars.locals_from_decl(func), TypeVars.rets_from_decl(func));
+        Validator.dispatch();
+        func.cbd_sidetable = Validator.build_sidetable();
+    }
+
+    def onModuleFinish(module: Module, size: u32, err: ErrorGen) {
+        interpreter.init_module(module);
+    }
+
+    def call(func: Function, args: Range<Value>) -> Result {
+        interpreter.it.reset(func).bind(args);
+        if (interpreter.it.frame == null) {
+            interpreter.it.state_ = StackState.RUNNING;
+            interpreter.it.runHostCall();
+        } else {
+            interpreter.dispatch();
+        }
+        var result: Result;
+        match (interpreter.it.state_) {
+            RETURNING => result = Result.Value(Ranges.dup(interpreter.it.values.peekn(func.sig.results.length)));
+            THROWING => result = Result.Throw(interpreter.it.thrown);
+            _ => result = Result.Throw(Trap.new(TrapReason.ERROR, "unsupported Lean interpreter stack switch", null));
+        }
+        interpreter.it.clear();
+        return result;
+    }
+}
